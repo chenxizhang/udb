@@ -134,10 +134,11 @@ the package immediately available on already released Ubuntu versions; those
 need separate, approved distribution paths. Official archive inclusion also
 does not automatically imply Canonical commercial support.
 
-The [packaging request](packaging/needs-packaging.txt) contains the public
-source, license, maintenance contact, and review notes. Filing it in Launchpad
-requires an authorized account; neither a GitHub Release nor a packaging request
-is an accepted archive upload.
+The [Ubuntu packaging request](https://bugs.launchpad.net/bugs/2174382) has been
+filed, and `ubuntu-sponsors` is subscribed for review. The
+[submission text](packaging/needs-packaging.txt) contains the public source,
+license, maintenance contact, and review notes. Submission is not sponsor
+approval or acceptance into the Ubuntu archive.
 
 ## Publication and package requirements
 
