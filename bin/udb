@@ -29,7 +29,6 @@
 # environment. This is not an OS reset, a general package updater, or a scheduler.
 # Keep this contract and --help consistent with changes. Documentation/comments
 # are English. Upstream: https://github.com/chenxizhang/udb.
-# The compatibility entry point is https://aka.ms/setup-wsl.
 #
 # Invariants:
 # - Inspect before changing. Keep usable compatible installations and user edits.
@@ -103,7 +102,7 @@
 # supported CPU architectures. Keep a failure local, bounded and diagnosable.
 # Never validate by running this entire installer on a shared agent host.
 # Before publishing with gh, check for remote edits, inspect the exact diff, and
-# compare the resulting Gist content. Do not switch the user's active gh account.
+# compare the published content. Do not switch the user's active gh account.
 # Preserve the final WSL_BOOTSTRAP_SCRIPT_END marker: curl|bash checks it.
 if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
     # Keep installer commands from consuming the remaining curl | bash input.
@@ -135,8 +134,8 @@ udb -- Ubuntu Development Bootstrap
 
 USAGE
   udb [-p | -w] [-c] [-t TENANT] [--skip-login]
-  bash setup-wsl.sh [-p | -w] [-c] [-t TENANT] [--skip-login]
-  curl -fsSL https://aka.ms/setup-wsl | bash -s -- [OPTIONS]
+  bash udb [-p | -w] [-c] [-t TENANT] [--skip-login]
+  curl -fsSL https://github.com/chenxizhang/udb/releases/latest/download/udb | bash -s -- [OPTIONS]
 
 Run as your normal Linux user, NOT with sudo bash or sudo sh.
 The script uses Bash, not POSIX sh. sudo is requested for system changes.
@@ -163,35 +162,34 @@ OPTIONS
 
 CURL | BASH EXAMPLES
   # Default: work profile, official download sources, login enabled.
-  curl -fsSL https://aka.ms/setup-wsl | bash
+  curl -fsSL https://github.com/chenxizhang/udb/releases/latest/download/udb | bash
 
   # Personal profile with China mirrors.
-  curl -fsSL https://aka.ms/setup-wsl | bash -s -- -pc
+  curl -fsSL https://github.com/chenxizhang/udb/releases/latest/download/udb | bash -s -- -pc
 
   # Work profile with China mirrors; skip optional CLI login.
-  curl -fsSL https://aka.ms/setup-wsl | bash -s -- -wc --skip-login
+  curl -fsSL https://github.com/chenxizhang/udb/releases/latest/download/udb | bash -s -- -wc --skip-login
 
   # Personal profile with an explicit Azure tenant.
-  curl -fsSL https://aka.ms/setup-wsl | bash -s -- -p -t contoso.onmicrosoft.com
+  curl -fsSL https://github.com/chenxizhang/udb/releases/latest/download/udb | bash -s -- -p -t contoso.onmicrosoft.com
 
   # Show help through the pipeline.
-  curl -fsSL https://aka.ms/setup-wsl | bash -s -- --help
+  curl -fsSL https://github.com/chenxizhang/udb/releases/latest/download/udb | bash -s -- --help
 
 Pass script options AFTER "bash -s --", not to curl.
 sudo and optional login prompts read /dev/tty, not the piped script.
 Without a controlling terminal, CLI login is skipped and manual commands are shown.
-The Raw download can be cached for 5 minutes. A changing query can bypass client
-caches, but does not guarantee an immediate upstream refresh:
-  curl -fsSL "https://aka.ms/setup-wsl?v=$(date +%s)" | bash -s -- -pc
+The latest-download URL follows the newest published release.
+Use a version-specific release URL when pinning a reviewed version.
 Piped setup buffers the remaining script before installation commands run, so
 interactive tools cannot consume later setup stages. An incomplete stream stops
 before installation starts. Download and inspect first if preferred.
 
 DOWNLOAD / INSPECT / RUN
-  curl -fsSL "https://aka.ms/setup-wsl?v=$(date +%s)" -o setup-wsl.sh
-  less setup-wsl.sh
-  bash setup-wsl.sh --help
-  bash setup-wsl.sh -pc -t contoso.onmicrosoft.com --skip-login
+  curl -fsSL https://github.com/chenxizhang/udb/releases/latest/download/udb -o udb
+  less udb
+  bash udb --help
+  bash udb -pc -t contoso.onmicrosoft.com --skip-login
 
 EXECUTION ORDER
   Numbered tasks run sequentially, each with its own status and installation check.
@@ -3144,7 +3142,7 @@ block_step() { die "Blocked: $*"; }
 _wsl_cli_configure_path
 mkdir -p "$HOME/.local/state/wsl-bootstrap"
 exec 9>"$HOME/.local/state/wsl-bootstrap/setup.lock"
-flock -n 9 || die "Another setup-wsl run or gh-aw retry is active; finish it before retrying."
+flock -n 9 || die "Another udb run or gh-aw retry is active; finish it before retrying."
 extension_stage=""
 cleanup_gh_aw_retry() {
     local status=$?
@@ -3582,7 +3580,7 @@ login_workiq() {
 [[ -x /usr/bin/flock ]] || die "Native flock is required (Ubuntu util-linux)."
 mkdir -p "$HOME/.local/state/wsl-bootstrap"
 exec 9>"$HOME/.local/state/wsl-bootstrap/setup.lock"
-/usr/bin/flock -n 9 || die "Another setup-wsl run is active for this user; finish it before rerunning."
+/usr/bin/flock -n 9 || die "Another udb run is active for this user; finish it before rerunning."
 report_directory="$(umask 077; mkdir -p "$HOME/.local/state/wsl-bootstrap"; \
     /usr/bin/mktemp -d "$HOME/.local/state/wsl-bootstrap/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")"
 echo "Per-task logs: $report_directory"

@@ -1,0 +1,22 @@
+Source: udb
+Section: admin
+Priority: optional
+Maintainer: chenxizhang <ares@xizhang.com>
+Build-Depends: debhelper-compat (= 13), python3
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/chenxizhang/udb
+Vcs-Git: https://github.com/chenxizhang/udb.git
+Vcs-Browser: https://github.com/chenxizhang/udb
+
+Package: udb
+Architecture: all
+Depends: ${misc:Depends}, apt, bash (>= 4.4), ca-certificates, curl, procps, python3 (>= 3.10), sudo
+Description: Ubuntu development-environment initializer
+ Initialize an Ubuntu development environment on a standalone system or WSL2.
+ Existing compatible tools and user configuration are preserved, and task
+ failures include individual recovery commands.
+ .
+ Package installation only installs the command and documentation. Run udb
+ separately as an ordinary user to initialize the host; initialization can
+ upgrade packages and change system configuration.

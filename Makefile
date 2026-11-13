@@ -1,6 +1,7 @@
 PREFIX ?= /usr/local
 bindir ?= $(PREFIX)/bin
 docdir ?= $(PREFIX)/share/doc/udb
+mandir ?= $(PREFIX)/share/man
 
 .PHONY: all check install
 
@@ -13,4 +14,5 @@ check:
 install:
 	install -D -m 0755 bin/udb "$(DESTDIR)$(bindir)/udb"
 	install -D -m 0644 README.md "$(DESTDIR)$(docdir)/README.md"
-	install -D -m 0644 LICENSE "$(DESTDIR)$(docdir)/LICENSE"
+	install -D -m 0644 LICENSE "$(DESTDIR)$(docdir)/copyright"
+	install -D -m 0644 docs/udb.1 "$(DESTDIR)$(mandir)/man1/udb.1"

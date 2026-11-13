@@ -1,0 +1,63 @@
+.TH UDB 1 "November 2026" "udb 0.1.0" "User Commands"
+.SH NAME
+udb \- initialize an Ubuntu development environment
+.SH SYNOPSIS
+.B udb
+.RB [ \-p " | " \-w ]
+.RB [ \-c ]
+.RB [ \-t " TENANT" ]
+.RB [ \-\-skip-login ]
+.SH DESCRIPTION
+udb initializes an Ubuntu 22.04, 24.04, or 26.04 development environment
+on amd64 or arm64, either standalone with systemd or on WSL2.
+Run it as an ordinary user with sudo access, not as root or through sh.
+.PP
+Installing the package only installs the command and documentation.
+Initialization happens only when the user explicitly runs udb.
+Existing compatible installations and user-owned configuration are preserved.
+Failures are reported per task; independent tasks continue.
+.SH OPTIONS
+.TP
+.BR \-p ", " \-\-personal
+Use the personal profile, including WorkIQ installation and login.
+.TP
+.BR \-w ", " \-\-work
+Use the work profile (the default).
+Skip WorkIQ unless an explicit tenant is supplied.
+Personal and work profiles are mutually exclusive.
+.TP
+.BR \-c ", " \-\-china-mirror
+Select the supported China download and package mirrors.
+.TP
+.BR \-pc ", " \-wc
+Combine the corresponding profile with China mirror mode.
+.TP
+.BR \-t ", " \-\-tenant " TENANT"
+Explicitly select the Azure tenant for login.
+Neither profile supplies a default tenant.
+.TP
+.B \-\-skip-login
+Skip GitHub, Azure, Copilot, and WorkIQ login.
+.TP
+.BR \-h ", " \-\-help
+Display the complete operational help without initializing the machine.
+.SH SIDE EFFECTS
+Explicit initialization upgrades apt packages and may install third-party
+tools, change the login shell, and configure Docker.
+Docker group membership grants root-equivalent access.
+On WSL, initialization may configure passwordless sudo.
+Copilot shortcuts use the upstream yolo option.
+When WorkIQ login is selected, its EULA is accepted if not already recorded.
+Read the complete help before proceeding on a machine you control.
+.SH EXIT STATUS
+Zero means all requested tasks completed or were explicitly skipped.
+Nonzero means an invalid invocation, interrupted execution, or failed or
+blocked tasks. Consult the printed per-task logs and recovery commands.
+.SH AUTHOR
+chenxizhang <ares@xizhang.com>
+.SH SEE ALSO
+.BR bash (1),
+.BR sudo (8),
+.BR apt (8)
+.PP
+Project: https://github.com/chenxizhang/udb

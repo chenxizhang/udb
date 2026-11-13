@@ -32,7 +32,7 @@ class InstallTests(unittest.TestCase):
                 self.assertIn("udb -- Ubuntu Development Bootstrap", help_result.stdout)
                 self.assertEqual(list(home.iterdir()), [])
                 documents = staging / prefix.lstrip("/") / "share/doc/udb"
-                self.assertTrue((documents / "LICENSE").is_file())
+                self.assertTrue((documents / "copyright").is_file())
                 self.assertTrue((documents / "README.md").is_file())
 
 

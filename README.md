@@ -9,13 +9,10 @@ This project is independent of Canonical and is not an official Ubuntu project.
 The executable is [bin/udb](bin/udb), licensed under the [MIT License](LICENSE).
 Maintainer: chenxizhang <ares@xizhang.com> (public maintenance contact).
 
-There is no released Debian package or APT repository yet.
-No Ubuntu or Debian inclusion request has been submitted.
-`apt install udb` is a future goal, not an available installation command.
-
-The compatibility entry point remains <https://aka.ms/setup-wsl>. It uses the
-same script as this repository. No organization-specific tenant or internal
-tool installer is included; existing installations are not uninstalled.
+Release packages are distributed through [GitHub Releases](https://github.com/chenxizhang/udb/releases).
+This is not an Ubuntu archive package or an APT repository.
+`apt install udb` without a local package file is not available.
+No organization-specific tenant or internal tool installer is included.
 
 Initial exact-name checks found no `udb` source or binary package in Ubuntu's
 primary archive and no Debian package tracker page for `udb`. These are
@@ -26,7 +23,21 @@ preliminary checks, not a name reservation or trademark clearance.
 Supported targets are Ubuntu 22.04, 24.04, and 26.04 on amd64 or arm64, either
 standalone with systemd or on WSL2. This is not a generic Linux initializer.
 
-Clone and inspect the source, then read the complete help before initializing:
+Download the Debian package and checksum list from the
+[v0.1.0 release](https://github.com/chenxizhang/udb/releases/tag/v0.1.0):
+
+```sh
+curl -fLO https://github.com/chenxizhang/udb/releases/download/v0.1.0/udb_0.1.0-1_all.deb
+curl -fLO https://github.com/chenxizhang/udb/releases/download/v0.1.0/SHA256SUMS
+sha256sum --ignore-missing --check SHA256SUMS
+sudo apt install ./udb_0.1.0-1_all.deb
+udb --help
+```
+
+Installing the package does not initialize the host. Read the help, then run
+`udb` separately as your ordinary user when ready.
+
+Alternatively, clone and inspect the source:
 
 ```sh
 git clone https://github.com/chenxizhang/udb.git
@@ -56,7 +67,7 @@ initialization, authentication, or remote installers. `PREFIX` defaults to
 are upgraded; Docker group membership grants root-equivalent access; WSL may
 receive passwordless sudo; generated Copilot shortcuts use `--yolo`; selected
 WorkIQ login accepts its EULA if not already recorded. Read `udb --help`.
-These inherited behaviors require archive-review consideration; an MIT license
+These behaviors require archive-review consideration; an MIT license
 does not make the entire setup policy suitable for every machine.
 
 ## Implementation
@@ -74,11 +85,23 @@ boundaries, network checks, and interactive authentication, while adding a
 compiled build/release toolchain. There is no identified CPU-bound workload
 that calls for Rust here.
 
-For now the script remains a self-contained distribution artifact so the Gist
-entry point keeps working. Any later extraction of large helpers into modules
-must preserve that artifact without runtime downloads of unversioned code.
-Legacy `wsl-bootstrap` state paths and managed-block markers are intentionally
-retained for safe reruns and configuration migration.
+The standalone executable is self-contained. Python helpers use quoted
+here-documents and positional arguments rather than interpolating shell values
+into Python code. Releases include the executable, source package, Debian
+package, and SHA-256 checksums.
+
+## Building packages
+
+The `debian/` directory uses debhelper compatibility level 13. Install the
+declared build dependencies, then run `dpkg-buildpackage -us -uc` from a source
+tree alongside its matching `udb_0.1.0.orig.tar.gz` upstream archive.
+The release source package is unsigned for review; a sponsor must choose the
+Ubuntu target release and sign an actual archive upload.
+
+The release also contains a build-validation report. Package checks exercise
+command/help behavior and installation/removal without running machine
+initialization. They are not a claim that every external service and interactive
+login has been tested on every supported Ubuntu version.
 
 ## Getting into the official Ubuntu archive
 
@@ -111,9 +134,10 @@ the package immediately available on already released Ubuntu versions; those
 need separate, approved distribution paths. Official archive inclusion also
 does not automatically imply Canonical commercial support.
 
-The unsubmitted [request template](packaging/needs-packaging.txt) includes the
-authorized license and contact but still needs reviewable packaging and an
-authorized Launchpad submission. Do not file it as a completed upload request.
+The [packaging request](packaging/needs-packaging.txt) contains the public
+source, license, maintenance contact, and review notes. Filing it in Launchpad
+requires an authorized account; neither a GitHub Release nor a packaging request
+is an accepted archive upload.
 
 ## Publication and package requirements
 

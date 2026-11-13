@@ -1,8 +1,3 @@
-UNSUBMITTED TEMPLATE -- NOT READY TO FILE
-
-The executable is available under MIT. Complete source packaging and review
-prerequisites before filing an upload request.
-
 Target: Ubuntu distribution on Launchpad
 Title: [needs-packaging] udb - Ubuntu development-environment initializer
 Tag: needs-packaging
@@ -12,18 +7,19 @@ udb (Ubuntu Development Bootstrap) helps ordinary users initialize an Ubuntu
 development environment on standalone Ubuntu or WSL2. It contains no default
 organization-specific tenant or internal tool installer.
 
-The Makefile install target copies the command and documentation only.
-Future package installation must not initialize the host, accept third-party
-EULAs, log into accounts, or change privilege policy. Users must invoke
-initialization separately.
+Package installation copies the command and documentation only. There are no
+package maintainer scripts that initialize the host, accept third-party EULAs,
+log into accounts, or change privilege policy. Users invoke initialization
+separately as an ordinary user.
 
 Project: https://github.com/chenxizhang/udb
-Source: https://github.com/chenxizhang/udb
+Source release: https://github.com/chenxizhang/udb/releases/tag/v0.1.0
+Upstream source: https://github.com/chenxizhang/udb/releases/download/v0.1.0/udb_0.1.0.orig.tar.gz
 License: MIT
 Public maintainer contact: chenxizhang <ares@xizhang.com>
-Debian WNPP request: [CHECK FIRST; link a related request if applicable]
-Reviewable source package: [REQUIRED before requesting an upload]
-Validation results: [REQUIRED: package checks and clean build results]
+Reviewable source package: https://github.com/chenxizhang/udb/releases/download/v0.1.0/udb_0.1.0-1.dsc
+Validation report: https://github.com/chenxizhang/udb/releases/download/v0.1.0/build-validation.txt
+Checksums: https://github.com/chenxizhang/udb/releases/download/v0.1.0/SHA256SUMS
 
 Notes for review:
 - Confirm archive/component suitability for any proprietary-tool integrations.
@@ -31,8 +27,14 @@ Notes for review:
   group access, Copilot --yolo aliases, and WorkIQ EULA acceptance.
 - The source rejects non-Ubuntu distributions; assess Ubuntu-direct submission
   rather than assuming it is currently a Debian-compatible initializer.
-- No package build or archive acceptance is asserted by this template.
+- This is a request for packaging/sponsorship review, not a claim of archive
+  acceptance. The unsigned upstream source package uses a noble changelog
+  target for the release preview; the sponsor must select the actual eligible
+  Ubuntu release/version for upload.
+- The current Ubuntu development series is tenacious (27.04). Runtime support
+  for that series has not been validated; the supported-runtime guard currently
+  permits 22.04, 24.04, and 26.04 only. This must be resolved before an upload
+  intended to run on 27.04, not bypassed by claiming untested support.
 - Never attach bootstrap run logs, credentials, account identifiers, shell
   configuration, or local backups to a public request.
-- File only through an authorized Launchpad account. Once reviewable packaging
-  is available, follow Ubuntu's sponsorship process.
+- The package name and related requests must be checked before filing.

@@ -1,0 +1,7 @@
+udb (0.1.0-1) noble; urgency=medium
+
+  * Initial upstream packaging for Ubuntu.
+  * Install only the command and documentation; do not initialize during
+    package installation.
+
+ -- chenxizhang <ares@xizhang.com>  Fri, 13 Nov 2026 08:39:26 +0000
