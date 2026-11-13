@@ -1,0 +1,37 @@
+UNSUBMITTED TEMPLATE -- NOT READY TO FILE
+
+The executable has not been published or packaged. Complete the license,
+source-release, privacy, maintenance, and review prerequisites first.
+The description below is proposed scope, not a claim of implemented behavior.
+
+Target: Ubuntu distribution on Launchpad
+Title: [needs-packaging] udb - Ubuntu development-environment initializer
+Tag: needs-packaging
+
+Proposed description:
+udb (Ubuntu Development Bootstrap) would help ordinary users initialize an
+Ubuntu development environment on standalone Ubuntu or WSL2. Its general-purpose
+release must not contain organization-specific default tenants, internal
+installers, or private authentication configuration.
+
+Installing the proposed Debian package would install the command and its
+documentation only. It must not initialize the host, accept third-party EULAs,
+log into accounts, or change privilege policy during package installation.
+Users would invoke initialization separately.
+
+Project: https://github.com/chenxizhang/udb
+Released source: [REQUIRED: versioned source release with explicit license]
+License: [REQUIRED: copyright-holder-authorized license]
+Public maintainer contact: [REQUIRED: explicitly approved reachable contact]
+Debian WNPP request: [CHECK FIRST; link a related request if applicable]
+Reviewable source package: [REQUIRED before requesting an upload]
+Validation results: [REQUIRED: package checks and clean build results]
+
+Notes for review:
+- The current repository contains documentation only; do not claim a release.
+- Confirm archive/component suitability for any proprietary-tool integrations.
+- No package license or archive acceptance is asserted by this template.
+- Never attach bootstrap run logs, credentials, account identifiers, shell
+  configuration, or local backups to a public request.
+- File only through an authorized Launchpad account. Once reviewable packaging
+  is available, follow Ubuntu's sponsorship process.
