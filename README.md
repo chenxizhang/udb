@@ -1,24 +1,84 @@
 # udb
 
-**Ubuntu Development Bootstrap** -- a proposed short name for an Ubuntu
+**Ubuntu Development Bootstrap** -- an Ubuntu
 development-environment initializer, usable on both standalone Ubuntu and WSL2.
 This project is independent of Canonical and is not an official Ubuntu project.
 
 ## Status
 
-This repository currently contains documentation and a packaging-request draft
-only. It does **not** contain an executable, a released Debian package, or an APT
-repository. No Ubuntu or Debian inclusion request has been submitted.
+The executable is [bin/udb](bin/udb), licensed under the [MIT License](LICENSE).
+Maintainer: chenxizhang <ares@xizhang.com> (public maintenance contact).
+
+There is no released Debian package or APT repository yet.
+No Ubuntu or Debian inclusion request has been submitted.
 `apt install udb` is a future goal, not an available installation command.
 
-The existing personal initializer remains unchanged. Its source has not been
-copied here: a public Gist is not, by itself, an open-source license.
-An explicit license from the copyright holder is required before publishing
-that source as this project or distributing packages.
+The compatibility entry point remains <https://aka.ms/setup-wsl>. It uses the
+same script as this repository. No organization-specific tenant or internal
+tool installer is included; existing installations are not uninstalled.
 
 Initial exact-name checks found no `udb` source or binary package in Ubuntu's
 primary archive and no Debian package tracker page for `udb`. These are
 preliminary checks, not a name reservation or trademark clearance.
+
+## Running and installing
+
+Supported targets are Ubuntu 22.04, 24.04, and 26.04 on amd64 or arm64, either
+standalone with systemd or on WSL2. This is not a generic Linux initializer.
+
+Clone and inspect the source, then read the complete help before initializing:
+
+```sh
+git clone https://github.com/chenxizhang/udb.git
+cd udb
+./bin/udb --help
+make check
+```
+
+Run `./bin/udb` as your ordinary user to initialize the machine. Do not run it
+with `sudo` or `sh`. Default work mode skips WorkIQ unless `--tenant` is given;
+`--personal` includes WorkIQ. Neither mode selects a tenant automatically.
+`--tenant TENANT` explicitly scopes Azure login; otherwise it uses `az login`.
+
+To install the command for later use:
+
+```sh
+sudo make install
+udb --help
+```
+
+`make install` only copies the executable and documentation. It does not run
+initialization, authentication, or remote installers. `PREFIX` defaults to
+`/usr/local`; `DESTDIR` supports package staging without writing into the host:
+`make install PREFIX=/usr DESTDIR=/path/to/staging`.
+
+**Important side effects when initialization is explicitly run:** apt packages
+are upgraded; Docker group membership grants root-equivalent access; WSL may
+receive passwordless sudo; generated Copilot shortcuts use `--yolo`; selected
+WorkIQ login accepts its EULA if not already recorded. Read `udb --help`.
+These inherited behaviors require archive-review consideration; an MIT license
+does not make the entire setup policy suitable for every machine.
+
+## Implementation
+
+The entry point is explicitly Bash, not POSIX `sh`. Bash coordinates native
+package managers, task results, timeouts, signals, and interactive CLI login.
+Python 3 standard-library helpers handle structured JSON/configuration edits,
+atomic replacement, restoration, and archive inspection. Small POSIX `sh`
+blocks limit individual privileged operations; they are not an alternative
+interpreter for the main program.
+
+This division avoids fragile shell parsing of structured data. Rewriting the
+orchestrator in Rust would still require the same external tools, privilege
+boundaries, network checks, and interactive authentication, while adding a
+compiled build/release toolchain. There is no identified CPU-bound workload
+that calls for Rust here.
+
+For now the script remains a self-contained distribution artifact so the Gist
+entry point keeps working. Any later extraction of large helpers into modules
+must preserve that artifact without runtime downloads of unversioned code.
+Legacy `wsl-bootstrap` state paths and managed-block markers are intentionally
+retained for safe reruns and configuration migration.
 
 ## Getting into the official Ubuntu archive
 
@@ -51,23 +111,22 @@ the package immediately available on already released Ubuntu versions; those
 need separate, approved distribution paths. Official archive inclusion also
 does not automatically imply Canonical commercial support.
 
-The unsubmitted [request template](packaging/needs-packaging.txt) deliberately
-contains placeholders. Do not file it as a completed request.
+The unsubmitted [request template](packaging/needs-packaging.txt) includes the
+authorized license and contact but still needs reviewable packaging and an
+authorized Launchpad submission. Do not file it as a completed upload request.
 
 ## Publication and package requirements
 
-Before any source release or submission:
+Before requesting archive review:
 
-- Confirm the copyright holder's choice of license and preserve required notices
-  for all included material. Do not invent a license for the existing script.
-- Choose a reachable, explicitly approved public maintainer contact. Archive
-  metadata, bug reports, and signing-key identities can be publicly retained.
-  Do not extract private contact information from local Git configuration.
-- Remove organization-specific tenants, internal installer references, and
-  account assumptions from the general-purpose version. Do not publish local
+- Preserve required license notices for all included material.
+- Use only the approved public maintenance contact. Archive metadata, bug
+  reports, and signing-key identities can be publicly retained.
+- Keep organization-specific defaults and internal installers out. Do not publish local
   logs, authentication state, shell histories, backups, or copied Git history.
-- Make third-party proprietary tools and authentication explicit choices.
-  Do not silently accept EULAs or weaken sudo policy for general users.
+- Review the initializer's side effects above with the sponsor. Decide whether
+  third-party tools, EULA acceptance, and WSL privilege-policy changes must be
+  separated or made additional explicit options for archive suitability.
 - Install only the command and documentation from the Debian package. Never run
   machine initialization, login flows, remote installers, or system upgrades
   from package installation hooks. Initialization must be separately invoked by

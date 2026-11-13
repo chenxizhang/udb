@@ -1,0 +1,3702 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# MIT License
+#
+# Copyright (c) 2026 chenxizhang
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# MAINTAINER CONTRACT -- read before changing this standalone script.
+#
+# Purpose: bootstrap a fresh Ubuntu WSL2 or standalone Ubuntu development
+# environment, then support repeated runs that add capabilities to that SAME
+# environment. This is not an OS reset, a general package updater, or a scheduler.
+# Keep this contract and --help consistent with changes. Documentation/comments
+# are English. Upstream: https://github.com/chenxizhang/udb.
+# The compatibility entry point is https://aka.ms/setup-wsl.
+#
+# Invariants:
+# - Inspect before changing. Keep usable compatible installations and user edits.
+#   Repair only recognizable bootstrap-owned partial installations at the SAME
+#   version. A new feature must account for machines that ran older revisions.
+# - Managed blocks/known managed paths define ownership, not mere file existence.
+#   Migrate known legacy artifacts explicitly. Never delete unrelated files or
+#   treat a user's different configuration as corruption. Preserve unknown state.
+# - Reruns are incremental: an absent flag does not undo earlier choices. Mirror
+#   mode changes requested mirrors; profile changes do not uninstall tools.
+#   System package upgrades are an intentional default. WSL automatically sets
+#   passwordless sudo only when needed; standalone Ubuntu preserves sudo policy.
+#   Do not "harden" these defaults away: they are explicit owner requirements.
+# - Preserve native Linux PATH precedence, virtualenvs, standard commands, Git
+#   identity, services and custom Docker backends. The owner-required interactive
+#   aliases cc/ccw/dd are intentional; use command cc/dd for the native tools.
+#   Do not shadow xdg-open. Windows interop is limited to the explicit WSL login-browser bridge;
+#   Windows binaries never satisfy Linux dependencies.
+# - Run tasks sequentially in strict-mode children, recording each result. Fail
+#   only actual dependents; optional Compose/Buildx cannot block Docker Engine.
+#   Report failure honestly at the end; never mask a failure with a later echo.
+# - No background progress watcher, general orchestration framework, sudo
+#   keepalive, automatic WSL shutdown, or daemon restart just to make setup pass.
+#   Hold one per-user run lock; child daemons must not inherit that lock.
+# - Bound network/download/credential probes. Keep terminal-reading commands in
+#   the foreground when using timeout. Never combine timeout + setsid + captured
+#   stdout: escaped descendants can hold the pipe open after timeout exits.
+# - Separate browser downloads from apt dependency installation. Never launch a
+#   browser during bootstrap. Do not apply a generic wall-clock SIGKILL to
+#   apt/dpkg: allow its interrupted transaction to settle and report the result.
+#   APT socket timeouts do NOT bound total downloads. Fetch packages first with
+#   --download-only and a wall-clock limit, then install with --no-download and
+#   no kill timer. Keep the same package selection flags in both phases.
+# - Validate shell syntax BEFORE publishing config. Save the original backup and
+#   a per-run pre-change copy; rollback only our still-unmodified writes when a
+#   shell check fails. Do not roll back packages or overwrite concurrent edits.
+# - Managed plugin updates must be pinned and staged, preserving local changes.
+#   Skills use pinned public content/checksums, not npx or repository-wide clones.
+#   Missing gh/gh-aw use pinned official Release binaries and embedded SHA-256 values;
+#   update both architectures together after reviewing upstream advisories.
+# - Audit the FULL download chain, not just npm/apt registries: postinstall and
+#   browser installers may fetch GitHub/Google assets independently. China mode
+#   must choose mirrors BEFORE official hosts for supported PUBLIC artifacts.
+#   Chrome uses the upstream cache layout and a verified staged archive, not
+#   `agent-browser install` (its internal Google URLs ignore npm mirror settings).
+#   Pin Chrome version + SHA-256 together; derive the digest from the official
+#   HTTPS archive, not the mirror or an invented field in the CfT JSON metadata.
+#   Keep existing complete browsers; never launch a browser to validate setup.
+#
+# Download coverage / deliberate limits:
+# - Ubuntu/Docker apt: USTC in China mode; official security suites are preserved.
+# - Node/npm/Copilot/WorkIQ: npmmirror in China mode; native packages come from
+#   npm. agent-browser's postinstall Release asset is fetched explicitly first.
+#   New agent-browser installs pin 0.43.0; mirrored native assets require pinned
+#   SHA-256 values for both Linux architectures. Never execute unchecked assets.
+# - Public GitHub assets/plugins/skills: gh-proxy.org first in China mode.
+# - Chrome for Testing: npmmirror binaries first in China mode; Google fallback.
+# - Azure apt and authentication: official Microsoft endpoints only.
+#   Keep auth output off task logs.
+#   Credentials/private content NEVER go through public mirrors. All network
+#   phases must be bounded and name the failed host; mirrors are not guaranteed.
+#   Do not send tokens/private resources to download mirrors. Review dependency
+#   changes, upstream install scripts and vulnerability information before adding
+#   or upgrading dependencies; do not broaden script execution permissions.
+#
+# Required change checks (temporary HOME, mocks and PTYs; no host-wide install):
+# fresh install; identical rerun; migration from a previous generated config;
+# interrupted/partial install; modified user config; unavailable network;
+# failure followed by an independent task; Ctrl+C/TERM; real ZLE key behavior
+# when changing bindings. Check both Ubuntu package-name variants and both
+# supported CPU architectures. Keep a failure local, bounded and diagnosable.
+# Never validate by running this entire installer on a shared agent host.
+# Before publishing with gh, check for remote edits, inspect the exact diff, and
+# compare the resulting Gist content. Do not switch the user's active gh account.
+# Preserve the final WSL_BOOTSTRAP_SCRIPT_END marker: curl|bash checks it.
+if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
+    # Keep installer commands from consuming the remaining curl | bash input.
+    streamed_script="$(/usr/bin/mktemp)" || exit 1
+    trap '/usr/bin/rm -f -- "$streamed_script"' EXIT
+    if ! cat > "$streamed_script"; then
+        echo "Cannot buffer the downloaded setup script; installation was not started." >&2
+        exit 1
+    fi
+    if [[ "$(/usr/bin/tail -n 1 "$streamed_script")" != "# WSL_BOOTSTRAP_SCRIPT_END" ]]; then
+        echo "The downloaded setup script is incomplete; installation was not started. Download it again." >&2
+        exit 1
+    fi
+    streamed_status=0
+    if ( : </dev/tty ) 2>/dev/null; then
+        bash "$streamed_script" "$@" </dev/tty || streamed_status=$?
+    else
+        bash "$streamed_script" "$@" </dev/null || streamed_status=$?
+    fi
+    exit "$streamed_status"
+fi
+
+set -Eeuo pipefail
+trap 'printf "Setup failed at line %s.\n" "$LINENO" >&2' ERR
+
+show_help() {
+    cat <<'HELP'
+udb -- Ubuntu Development Bootstrap
+
+USAGE
+  udb [-p | -w] [-c] [-t TENANT] [--skip-login]
+  bash setup-wsl.sh [-p | -w] [-c] [-t TENANT] [--skip-login]
+  curl -fsSL https://aka.ms/setup-wsl | bash -s -- [OPTIONS]
+
+Run as your normal Linux user, NOT with sudo bash or sudo sh.
+The script uses Bash, not POSIX sh. sudo is requested for system changes.
+Supported: Ubuntu 22.04/24.04/26.04, amd64/arm64, on WSL2 or a systemd server.
+Use a Linux home directory. Windows executables do not satisfy Linux dependencies.
+China mirror mode requires an existing native Python 3 before apt sources change.
+
+OPTIONS
+  -p, --personal       Personal profile: include WorkIQ installation and login.
+  -w, --work           Work profile (DEFAULT): skip WorkIQ unless -t is supplied.
+                       Neither profile selects an Azure tenant automatically.
+                       Personal and work options are mutually exclusive.
+  -c, --china-mirror   Select USTC Ubuntu/Docker CE, npmmirror Node/npm,
+                       TUNA pip, and DaoCloud Docker Hub mirrors.
+  -pc                  Same as -p -c.
+  -wc                  Same as -w -c.
+  -t, --tenant TENANT  Azure tenant ID or domain, e.g. contoso.onmicrosoft.com.
+                       Overrides the tenant in EITHER personal or work mode:
+                       az login --tenant TENANT --skip-subscription-discovery
+                       Without -t, both profiles use plain az login.
+  --skip-login         Skip the GitHub/Azure/Copilot/WorkIQ login stage.
+                       Login is enabled by default; valid existing accounts are kept.
+  -h, --help           Print this help without installing or changing anything.
+
+CURL | BASH EXAMPLES
+  # Default: work profile, official download sources, login enabled.
+  curl -fsSL https://aka.ms/setup-wsl | bash
+
+  # Personal profile with China mirrors.
+  curl -fsSL https://aka.ms/setup-wsl | bash -s -- -pc
+
+  # Work profile with China mirrors; skip optional CLI login.
+  curl -fsSL https://aka.ms/setup-wsl | bash -s -- -wc --skip-login
+
+  # Personal profile with an explicit Azure tenant.
+  curl -fsSL https://aka.ms/setup-wsl | bash -s -- -p -t contoso.onmicrosoft.com
+
+  # Show help through the pipeline.
+  curl -fsSL https://aka.ms/setup-wsl | bash -s -- --help
+
+Pass script options AFTER "bash -s --", not to curl.
+sudo and optional login prompts read /dev/tty, not the piped script.
+Without a controlling terminal, CLI login is skipped and manual commands are shown.
+The Raw download can be cached for 5 minutes. A changing query can bypass client
+caches, but does not guarantee an immediate upstream refresh:
+  curl -fsSL "https://aka.ms/setup-wsl?v=$(date +%s)" | bash -s -- -pc
+Piped setup buffers the remaining script before installation commands run, so
+interactive tools cannot consume later setup stages. An incomplete stream stops
+before installation starts. Download and inspect first if preferred.
+
+DOWNLOAD / INSPECT / RUN
+  curl -fsSL "https://aka.ms/setup-wsl?v=$(date +%s)" -o setup-wsl.sh
+  less setup-wsl.sh
+  bash setup-wsl.sh --help
+  bash setup-wsl.sh -pc -t contoso.onmicrosoft.com --skip-login
+
+EXECUTION ORDER
+  Numbered tasks run sequentially, each with its own status and installation check.
+  Validate options, Ubuntu/WSL2, architecture and native PATH before any changes.
+  Then authorize sudo; configure apt mirrors; update metadata; upgrade packages.
+  WSL passwordless sudo is configured only when it is not already effective.
+  Check base commands, Python, pip and venv as separate tasks.
+  Install/check GitHub CLI, Azure CLI, Node and npm independently.
+  After GitHub CLI, install missing gh-aw v1.2.1 (prerelease); keep existing gh-aw.
+  Install missing WorkIQ globally under ~/.local, using its native Linux binary.
+  Default work mode (also -w/--work/-wc) without -t/--tenant skips WorkIQ installation,
+  runtime libraries, EULA acceptance and login; existing WorkIQ is not removed.
+  Keep existing WorkIQ versions. WorkIQ login reuses cached credentials first.
+  Check WorkIQ's WebKit/libsecret runtime libraries before login.
+  Accept the WorkIQ EULA only if its configuration does not already record acceptance.
+  Configure requested language mirrors; install/repair Copilot at the same version.
+  Install/check agent-browser CLI.
+  Install only the agent-browser skill globally for GitHub Copilot.
+  Save managed local web instructions to ~/.copilot/copilot-instructions.md.
+  Configure Bash; check zsh; fetch each pinned plugin independently.
+  Configure zsh and verify BOTH login and non-login interactive startup, completion,
+  actual widget bindings and a history suggestion before changing the login shell.
+  Check/configure tmux, Docker Engine, Compose and Buildx independently.
+  Keep an existing configured/system browser without replacing it. For the
+  default browser, install only missing Linux library packages; keep a cached
+  browser without contacting the download service or checking remote versions.
+  Check default-browser libraries with apt separately from the verified Chrome
+  archive download. Use npmmirror first in China mode, not Google's installer.
+  Publish only a complete extracted cache. Never launch a browser.
+  Each CLI is checked in its own install task, without repeating all checks later.
+  Check GitHub/Azure/Copilot/WorkIQ authentication independently.
+  Never replay interactive login prompts.
+
+FAILURES, RETRIES AND DIAGNOSTICS
+  Downloads, plugin fetches, npm installs/metadata and apt operations get up to
+  TWO attempts, with a 2-second wait. Downloads detect stalled transfers.
+  Plugin fetches time out after 30 seconds.
+  Missing gh uses official precompiled binaries, not a new apt repository.
+  Each binary source gets 60 seconds: China mode tries gh-proxy.org first,
+  otherwise GitHub first, then the other source. Embedded SHA-256 values verify
+  the archive before extraction. No remote install scripts are executed.
+  When gh is absent, only the exact old bootstrap github-cli.list is disabled
+  before apt update; custom sources and existing usable installations are kept.
+  Missing Chrome uses a pinned Chrome-for-Testing archive and embedded SHA-256.
+  Each source gets 180 seconds (npmmirror/Google, China mirror first with -c).
+  Matching complete browser caches are kept without network checks. A partial
+  cache for the pinned version is preserved aside and replaced only after the
+  new archive is verified and fully extracted. Other incomplete caches are
+  reported for manual inspection; custom browsers are never overwritten.
+  The agent-browser skill is one public SKILL.md file: no npx/skills package or
+  repository clone is required. Each download source gets a 30-second limit.
+  Official mode tries raw.githubusercontent.com, then gh-proxy.org; China mirror
+  mode reverses this order.   This source order applies only to the public skill file.
+  npm metadata/install commands have 45/180-second limits. Apt acquisition uses
+  20-second socket timeouts and waits 20 seconds for its lock. Download-only
+  operations get two attempts: 120 seconds each for installs, 300 for upgrades.
+  A timed-out download fails only that task; cached archives are kept for reruns.
+  Installation then uses --no-download, with no wall-clock kill timer for dpkg.
+  Apt metadata refresh has a 90-second limit. Package installation/upgrade is
+  not forcibly killed while dpkg is configuring packages.
+  Zsh plugins try GitHub once, then retry through gh-proxy.org if it fails.
+  China mirror mode uses gh-proxy.org first, with GitHub as the fallback.
+  Plugin fetches use HTTP/1.1 and still require the pinned Git commit.
+  In China mirror mode, other public GitHub file downloads try gh-proxy.org first,
+  then GitHub. Authentication/private resources are never proxied.
+  The agent-browser native Release download is handled separately in this mode,
+  pinned to 0.43.0 and checked against embedded SHA-256 values before its official
+  postinstall runs with a command-local script allowance. Existing usable versions
+  are kept; older broken versions need manual repair when no checksum is pinned.
+  Matching skills are kept without downloading; checksum-owned old skills can be
+  updated. Unknown or user-edited skills are preserved, not silently replaced.
+  Configuration validation, conflicts and interactive authentication are NOT
+  blindly retried. Interruptions stop setup rather than being retried.
+  Ctrl+C, termination and terminal hangup stop the current task's descendants.
+  Package transactions are not escalated to SIGKILL; cleanup waits for them.
+  Existing custom files/accounts are not reset to force success.
+  A task failure does not stop independent tasks. Only actual prerequisites block
+  dependents: e.g. failed plugin fetch blocks zsh configuration, not the other
+  plugin; missing Node blocks npm-based installs, not zsh or GitHub CLI.
+  Failed apt upgrades do not block installs when apt metadata is usable; failed
+  apt preparation blocks missing-package work, but installed packages/tools can be
+  configured. Failed optional CLIs never block zsh's plugin checks.
+  Each action keeps Bash strict mode inside an isolated child. Partial work is
+  never treated as success because a later echo/cleanup succeeded.
+  A final summary lists SUCCESS / FAILED / BLOCKED / SKIPPED for EVERY task.
+  Failed/blocked tasks include manual installation/login or diagnostic commands,
+  also saved in summary.txt. Fix blocked prerequisites first. These commands are
+  suggestions only; setup never executes them as automatic retries. Configuration
+  conflicts require inspection, not a generic command that overwrites user files.
+  A failed gh-aw step also saves gh-aw-retry.sh in the run directory: run it
+  with Bash to retry only gh-aw using the same pinned binary, checksums and
+  mirror mode. Empty gh-aw directories are removed with rmdir; nonempty partial
+  installations and symlinks are preserved for manual inspection.
+  Private per-task logs and summary.txt are kept under:
+    ~/.local/state/wsl-bootstrap/run-<UTC-time>-<unique-id>/
+  Each task prints its stable ID, log path and elapsed time. While a logged task
+  runs, a progress update with its latest log lines appears every 15 seconds.
+  Complete task details are printed when the task ends.
+  Local managed configuration writes time out after 30 seconds; non-regular
+  configuration files are rejected instead of reading pipes/devices indefinitely.
+  Interactive authentication output is NOT logged.
+  Any failed/blocked task makes setup exit nonzero AFTER all independent tasks.
+  Use the summary's manual commands to repair individual tools without rerunning
+  setup, or rerun after fixing the cause; valid installations/settings are kept.
+  Only a successful run with verified zsh enters interactive login zsh. Existing
+  shells/tmux servers are never reloaded; use a new session or exec zsh -l.
+  History suggestions need a prefix matching commands already in zsh history.
+
+PRESERVATION AND SIDE EFFECTS
+  Existing non-apt tools are kept; unsupported errors fail their affected task.
+  Existing apt packages ARE upgraded by default; this is intentional, not a dry
+  run. Package maintainer scripts may restart services. An upgrade failure does
+  not stop independent tasks when package metadata/state remains usable.
+  Changed managed settings keep their original .wsl-bootstrap.bak and a per-run
+  pre-change copy under the private run log directory.
+  Identical managed blocks are not rewritten; unrelated shell settings are kept.
+  Existing Copilot instructions are preserved; only the managed web testing block
+  is added/refreshed. Web changes must be tested locally with agent-browser.
+  Installing the current agent-browser npm package requires Node.js 24 or newer;
+  older existing Node versions are not upgraded automatically.
+  Mirror mode keeps custom apt hosts and official Ubuntu security sources.
+  It disables NodeSource apt entries and installs missing Node from verified
+  mirrored LTS archives; existing Node is kept.
+  It explicitly changes npm/pip registries and adds a Docker mirror without
+  deleting other configuration keys or existing Docker registry mirrors.
+  Desktop/remote/rootless/custom Docker backends are not replaced; configure
+  their registry mirrors separately in the selected backend.
+  Docker group membership grants root-equivalent access and needs a fresh login.
+  Passwordless sudo is automatically configured on WSL only when needed.
+  Standalone Ubuntu keeps its existing sudo policy.
+  Windows browser support requires WSL drive mounts and interoperability.
+  The login-browser bridge uses BROWSER/GH_BROWSER, not xdg-open. The known legacy
+  xdg-open -> wsl-browser symlink is removed; other openers are preserved.
+  WSL systemd is enabled for the next boot only when native Docker needs it;
+  explicitly disabled systemd and custom daemon policies are not overridden.
+  Package upgrades or newly enabled systemd can require a restart; never automatic.
+  Existing sessions/tmux servers are not restarted; their groups do not refresh.
+
+AUTHENTICATION AND SHORTCUTS
+  GitHub: gh auth login --hostname github.com -p ssh --web. Saved credentials are
+  validated before login is skipped. Fill missing Git user.name/user.email from
+  GitHub; never overwrite existing effective identity settings.
+  Azure: az login, or the tenant-specific syntax described under -t.
+  Copilot: environment/GitHub CLI credentials are reused when available.
+  WorkIQ: workiq auth login reuses cached tokens before interactive sign-in.
+  Native Linux login needs a working authentication broker or system browser.
+  Login output is verified because upstream can return zero after a failure.
+  Classic PATs are not supported by Copilot. Its permissions/subscription are
+  checked by Copilot when used; finding a token is not proof of Copilot access.
+  Standalone login requires libsecret, GNOME keyring and D-Bus; no plaintext tokens.
+  Credential checks time out after 30 seconds. Network/validation errors do not
+  replace saved accounts; other login steps continue before failures are reported.
+  Failed login, a skip choice, --skip-login, or no controlling terminal displays
+  manual retry guidance without replacing saved accounts.
+  Inconclusive network checks suggest rerunning setup, not replacing the account.
+  Failures exit nonzero; cleanup errors do not replace the original failure code.
+  cc [args]   Git pull, then copilot --yolo with all extra args.
+  ccw [args]  Same pull, then copilot --yolo -w with all extra args.
+  dd [args]   Temporary workspace, then copilot --yolo with extra args.
+  A failed pull warns but still starts Copilot; outside Git no pull is attempted.
+  These managed aliases replace copilot-here/copilot-worktree/copilot-temp.
+  Use command cc or command dd to run the native tools instead of these aliases.
+  Existing shells are not modified; open a new shell to use the updated aliases.
+  Zsh uses history suggestions, completion, highlighting and a robbyrussell-style
+  prompt with directory, Git branch and a tracked-change marker; no special font.
+  Single-path cd prefers exact spelling, then resolves directory components
+  case-insensitively; ambiguous matches fail without changing directory.
+  Other commands, cd options/substitution and existing cd functions/aliases are
+  unchanged. Use builtin cd to bypass this fallback. Only new zsh sessions load it.
+HELP
+}
+
+setup_step=0
+show_progress() {
+    setup_step=$((setup_step + 1))
+    printf '\n'
+    if [[ -t 1 ]]; then
+        printf '\033[1;36m'
+    fi
+    printf '[%02d] %s\n' "$setup_step" "$1"
+    if [[ -t 1 ]]; then
+        printf '\033[0m'
+    fi
+}
+
+login_requested=1
+login_skipped=0
+personal_requested=0
+work_requested=0
+china_mirror_requested=0
+azure_tenant=""
+while (( $# > 0 )); do
+    argument="$1"
+    case "$argument" in
+        --skip-login) login_skipped=1 ;;
+        -p|--personal) personal_requested=1 ;;
+        -w|--work) work_requested=1 ;;
+        -c|--china-mirror) china_mirror_requested=1 ;;
+        -pc) personal_requested=1; china_mirror_requested=1 ;;
+        -wc) work_requested=1; china_mirror_requested=1 ;;
+        -t|--tenant)
+            if (( $# < 2 )) || [[ -z "$2" || "$2" == -* ]]; then
+                printf 'Option %s requires a tenant ID or domain.\n' "$argument" >&2
+                exit 2
+            fi
+            azure_tenant="$2"
+            shift
+            ;;
+        -h|--help)
+            show_help
+            # Drain streamed input so the early help exit does not break curl's pipe.
+            if [[ -z "${BASH_SOURCE[0]:-}" && ! -t 0 ]]; then
+                cat >/dev/null
+            fi
+            exit 0
+            ;;
+        *) printf 'Unknown argument: %s\n' "$argument" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+if (( login_skipped == 1 )); then
+    login_requested=0
+fi
+
+if (( personal_requested == 1 && work_requested == 1 )); then
+    printf 'Options -p/--personal and -w/--work are mutually exclusive.\n' >&2
+    exit 2
+fi
+
+workiq_requested=1
+workiq_skip_reason="WorkIQ is not requested for work mode without an explicit tenant."
+if (( personal_requested == 0 )) && [[ -z "$azure_tenant" ]]; then
+    workiq_requested=0
+fi
+
+show_progress "Checking platform and native prerequisites"
+if (( EUID == 0 )); then
+    echo "Run as your normal Ubuntu user with sudo access, not with sudo bash." >&2
+    exit 1
+fi
+
+source /etc/os-release
+case "${ID}:${VERSION_ID}" in
+    ubuntu:22.04|ubuntu:24.04|ubuntu:26.04) ;;
+    *) echo "Supported: Ubuntu 22.04, 24.04, or 26.04." >&2; exit 1 ;;
+esac
+arch="$(/usr/bin/dpkg --print-architecture)"
+case "$arch" in
+    amd64|arm64) ;;
+    *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
+esac
+
+kernel_release="$(uname -r)"
+is_wsl=0
+if [[ "${kernel_release,,}" == *microsoft* || "${kernel_release,,}" == *wsl* ]]; then
+    is_wsl=1
+    [[ "${kernel_release,,}" == *microsoft*wsl2* || "${kernel_release,,}" == *microsoft*standard* ]] \
+        || { echo "Docker requires WSL2; upgrade this WSL1 distribution before running setup." >&2; exit 1; }
+fi
+docker_package_base=https://download.docker.com
+node_dist_base=https://nodejs.org/dist
+npm_mirror=https://registry.npmmirror.com
+pip_mirror=https://pypi.tuna.tsinghua.edu.cn/simple
+docker_registry_mirror=https://docker.m.daocloud.io
+if (( china_mirror_requested == 1 )); then
+    docker_package_base=https://mirrors.ustc.edu.cn/docker-ce
+    node_dist_base=https://npmmirror.com/mirrors/node
+fi
+
+tmp="$(/usr/bin/mktemp -d)"
+run_state="$tmp"
+docker_restart_required=0
+docker_source_created=0
+docker_key_created=0
+node_stage=""
+plugin_stage=""
+skill_stage=""
+gh_stage=""
+extension_stage=""
+browser_stage=""
+active_step_child=""
+setup_stopping=0
+provisional_apt_files=()
+cleanup() {
+    local failed=0 stage file
+    for file in "${provisional_apt_files[@]}"; do
+        sudo -n rm -f -- "$file" \
+            || { printf 'Cleanup could not remove the unverified apt file: %s\n' "$file" >&2; failed=1; }
+    done
+    if (( docker_source_created == 1 )); then
+        sudo -n rm -f -- /etc/apt/sources.list.d/docker.sources \
+            || { echo "Cleanup could not remove the newly created Docker source." >&2; failed=1; }
+    fi
+    if (( docker_key_created == 1 )); then
+        sudo -n rm -f -- /etc/apt/keyrings/wsl-bootstrap-docker.asc \
+            || { echo "Cleanup could not remove the newly created Docker signing key." >&2; failed=1; }
+    fi
+    /usr/bin/rm -f --     "$tmp/githubcli.gpg" "$tmp/github-cli.list" "$tmp/azure-cli.sources" \
+    "$tmp/nodesource.sources" "$tmp/node-preferences" "$tmp/microsoft.asc" \
+        "$tmp/microsoft.gpg" "$tmp/nodesource.asc" \
+        "$tmp/nodesource.gpg" "$tmp/node-index.json" "$tmp/sudoers" \
+        "$tmp/bashrc-path" "$tmp/config-block" "$tmp/native-path.zsh" \
+        "$tmp/wsl-browser" "$tmp/docker.asc" "$tmp/docker.sources" \
+        "$tmp/docker-release" "$tmp/docker-plan" "$tmp/mirror-config.py" \
+        "$tmp/node.tar.gz" "$tmp/node-checksums" \
+        "$tmp/agent-browser-native" \
+        "$tmp/gh.tar.gz" \
+        "$tmp/chrome.zip" \
+        "$tmp/zsh-startup.log" "$tmp/copilot-version.log" "$tmp/workiq-login.log" \
+        "$tmp/workiq-config.log" "$tmp/package-transaction" \
+        "$tmp/apt-ready" "$tmp/docker-restart-required" \
+        || { echo "Cleanup could not remove temporary setup files." >&2; failed=1; }
+    for stage in "$node_stage" "$plugin_stage" "$skill_stage" "$gh_stage" "$extension_stage" "$browser_stage"; do
+        if [[ -n "$stage" && -d "$stage" ]]; then
+            /usr/bin/rm -r -- "$stage" \
+                || { printf 'Cleanup could not remove the staging directory: %s\n' "$stage" >&2; failed=1; }
+        fi
+    done
+    /usr/bin/rmdir -- "$tmp" \
+        || { printf 'Cleanup could not remove the temporary directory: %s\n' "$tmp" >&2; failed=1; }
+    return "$failed"
+}
+finish_setup() {
+    local exit_status="$1"
+    trap - EXIT
+    trap '' INT TERM HUP
+    setup_stopping=1
+    if ! stop_step_processes; then
+        if (( exit_status == 0 )); then
+            exit_status=1
+        fi
+    fi
+    if (( exit_status != 0 )) && [[ "${current_step:-}" == bash || "${current_step:-}" == zsh-config ]]; then
+        restore_step_configuration "$current_step" \
+            || echo "Automatic configuration restore was incomplete; inspect the per-run backups." >&2
+    fi
+    if ! cleanup; then
+        if (( exit_status == 0 )); then
+            exit_status=1
+        fi
+    fi
+    exit "$exit_status"
+}
+trap 'finish_setup "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+process_identity() {
+    local pid="$1" information
+    local -a fields
+    if ! IFS= read -r information 2>/dev/null <"/proc/$pid/stat"; then
+        return 1
+    fi
+    information="${information##*) }"
+    read -r -a fields <<< "$information"
+    printf '%s' "${fields[19]}"
+}
+
+signal_step_process() {
+    local pid="$1" identity="$2" signal="$3" current
+    current="$(process_identity "$pid")" || return 0
+    [[ "$current" == "$identity" ]] || return 0
+    if ! kill "-$signal" "$pid" 2>/dev/null; then
+        current="$(process_identity "$pid")" || return 0
+        [[ "$current" == "$identity" ]] || return 0
+        printf 'Could not send %s to setup child PID %s; inspect it manually.\n' "$signal" "$pid" >&2
+        return 1
+    fi
+}
+
+stop_step_processes() {
+    local pid identity children index signal failed=0
+    local -a queue=() processes=()
+    local -A identities=()
+    [[ -z "${active_step_child:-}" ]] || queue+=("$active_step_child")
+    # Snapshot only our task trees, retaining start times to avoid reused PIDs.
+    for ((index=0; index<${#queue[@]}; index++)); do
+        pid="${queue[index]}"
+        [[ -z "${identities[$pid]:-}" ]] || continue
+        identity="$(process_identity "$pid")" || continue
+        identities["$pid"]="$identity"
+        processes+=("$pid")
+        if [[ -r "/proc/$pid/task/$pid/children" ]]; then
+            children="$(<"/proc/$pid/task/$pid/children")"
+            for pid in $children; do
+                [[ "$pid" =~ ^[0-9]+$ ]] && queue+=("$pid")
+            done
+        fi
+    done
+    if (( ${#processes[@]} > 0 )); then
+        echo "Stopping setup task children..." >&2
+        for signal in TERM CONT; do
+            for ((index=${#processes[@]}-1; index>=0; index--)); do
+                pid="${processes[index]}"
+                signal_step_process "$pid" "${identities[$pid]}" "$signal" || failed=1
+            done
+        done
+        if [[ -f "$run_state/package-transaction" ]]; then
+            echo "Waiting for the interrupted package transaction; no SIGKILL will be sent." >&2
+        else
+            sleep 2
+            for pid in "${processes[@]}"; do
+                signal_step_process "$pid" "${identities[$pid]}" KILL || failed=1
+            done
+        fi
+    fi
+    if [[ -n "${active_step_child:-}" ]]; then
+        wait "$active_step_child" 2>/dev/null || true
+    fi
+    active_step_child=""
+    return "$failed"
+}
+
+die() {
+    echo "$*" >&2
+    exit 1
+}
+
+sudo() {
+    if [[ "${1:-}" == -n && "${setup_stopping:-0}" == 0 \
+        && "${current_step:-}" != sudo ]] \
+        && ! command sudo -n /usr/bin/true >/dev/null 2>&1; then
+        [[ "${step_status[sudo]:-not-run}" == success ]] \
+            || { echo "Sudo authorization is unavailable for this task." >&2; return 1; }
+        if ( : </dev/tty ) 2>/dev/null; then
+            echo "Sudo authorization expired; please authorize this system change." >&2
+            command sudo -v </dev/tty || return
+        else
+            echo "Sudo authorization expired without a terminal; rerun interactively." >&2
+            return 1
+        fi
+    fi
+    command sudo "$@"
+}
+
+_wsl_cli_windows_path() {
+    local resolved release
+    IFS= read -r release </proc/sys/kernel/osrelease || return 2
+    [[ "${release,,}" == *microsoft* || "${release,,}" == *wsl* ]] || return 1
+    resolved="$(/usr/bin/readlink -m -- "$1")" || return 2
+    case "$resolved" in
+        /mnt/[a-zA-Z]|/mnt/[a-zA-Z]/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_wsl_cli_configure_path() {
+    local part status seen=":"
+    local -a parts=() native=()
+    IFS=: read -r -a parts <<< "${PATH:-}"
+    for part in "${parts[@]}" "$HOME/.local/bin" \
+        /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
+        [[ -n "$part" ]] || continue
+        [[ "$seen" != *":$part:"* ]] || continue
+        seen+="$part:"
+        if _wsl_cli_windows_path "$part"; then
+            continue
+        else
+            status=$?
+            if (( status != 1 )); then
+                printf 'Cannot resolve PATH entry: %s\n' "$part" >&2
+                return "$status"
+            fi
+            native+=("$part")
+        fi
+    done
+    local IFS=:
+    PATH="${native[*]}"
+    export PATH
+    hash -r
+}
+
+if _wsl_cli_windows_path "$HOME/.local/bin"; then
+    die "The user-local bin directory points into Windows. Use a Linux home directory."
+fi
+_wsl_cli_configure_path
+
+available() {
+    local executable status
+    executable="$(type -P -- "$1")" || return 1
+    if _wsl_cli_windows_path "$executable"; then
+        die "Windows-backed command in a Linux PATH directory: $executable. Move that shim aside explicitly before rerunning."
+    else
+        status=$?
+        (( status == 1 )) || die "Cannot resolve command path: $executable"
+    fi
+    [[ "$executable" != *.exe ]] || die "Windows executable cannot satisfy $1: $executable"
+    return 0
+}
+
+check_existing() {
+    if available "$1"; then
+        /usr/bin/timeout --kill-after=5s 15s "$@" >/dev/null \
+            || die "Existing $1 failed its command check or timed out. Repair it before rerunning."
+        echo "Keeping existing $1: $(command -v "$1")"
+        return 0
+    fi
+    return 1
+}
+
+retry() {
+    local label="$1" attempt status=0
+    shift
+    for ((attempt=1; attempt<=2; attempt++)); do
+        if "$@"; then
+            return 0
+        else
+            status=$?
+        fi
+        if (( status == 130 || status == 143 )); then
+            exit "$status"
+        fi
+        printf '%s failed (attempt %s/2, exit %s).\n' "$label" "$attempt" "$status" >&2
+        if (( attempt < 2 )); then
+            sleep 2
+        fi
+    done
+    return "$status"
+}
+
+declare -a step_order=()
+declare -A step_status=() step_labels=() step_notes=()
+current_step=""
+
+block_step() {
+    printf '%s\n' "$*" > "$report_directory/$current_step.blocked"
+    die "Blocked: $*"
+}
+
+require_commands() {
+    local tool
+    for tool in "$@"; do
+        available "$tool" || block_step "Required native command is missing: $tool"
+    done
+}
+
+require_step() {
+    [[ "${step_status[$1]:-not-run}" == success ]] \
+        || block_step "Required step $1 did not succeed (${step_status[$1]:-not-run})."
+}
+
+execute_step() {
+    trap - EXIT
+    # The parent owns the run lock; installed daemons must not inherit it.
+    exec 9>&-
+    active_step_child=""
+    set -Eeuo pipefail
+    trap 'printf "Step %s failed at line %s (exit %s).\n" "$current_step" "$LINENO" "$?" >&2' ERR
+    tmp="$(/usr/bin/mktemp -d)"
+    docker_source_created=0
+    docker_key_created=0
+    node_stage=""
+    plugin_stage=""
+    skill_stage=""
+    gh_stage=""
+    extension_stage=""
+    browser_stage=""
+    provisional_apt_files=()
+    apt_updated=0
+    if [[ -f "$run_state/apt-ready" ]]; then
+        apt_updated=1
+    fi
+    trap 'finish_setup "$?"' EXIT
+    export npm_config_fetch_retries=1 npm_config_fetch_timeout=30000
+    export npm_config_fetch_retry_mintimeout=1000 npm_config_fetch_retry_maxtimeout=3000
+    "$@"
+}
+
+wait_step() {
+    local child="$1" log_file="$2" started="$3" ticks=0
+    while kill -0 "$child" 2>/dev/null; do
+        sleep 1
+        kill -0 "$child" 2>/dev/null || break
+        ticks=$((ticks + 1))
+        if (( ticks % 15 == 0 )); then
+            printf '\nRUNNING: %s (%ss elapsed). Log: %s\n' \
+                "$current_step" "$((SECONDS - started))" "$log_file"
+            if [[ -s "$log_file" ]]; then
+                /usr/bin/tail -n 5 -- "$log_file"
+            else
+                echo "No task output yet."
+            fi
+            if (( ticks % 60 == 0 )); then
+                /usr/bin/ps -o pid,ppid,etime,stat,comm --ppid "$child" \
+                    || echo "No direct child commands could be listed; inspect the task log."
+            fi
+        fi
+    done
+}
+
+run_step() {
+    local id="$1" label="$2" dependencies="$3" dependency status=0 child started
+    local log_file=""
+    shift 3
+    step_order+=("$id")
+    step_labels["$id"]="$label"
+    show_progress "$label"
+    for dependency in $dependencies; do
+        if [[ "${step_status[$dependency]:-not-run}" != success ]]; then
+            step_status["$id"]=blocked
+            step_notes["$id"]="Requires $dependency (${step_status[$dependency]:-not-run})."
+            printf 'BLOCKED: %s\n' "${step_notes[$id]}" >&2
+            return 0
+        fi
+    done
+    current_step="$id"
+    started=$SECONDS
+    printf 'Task ID: %s\n' "$id"
+    # Do not put the action in an if/|| condition: Bash would disable its errexit.
+    # An unconditionally started child retains strict mode; only wait is tested.
+    if [[ "$id" == login-* ]]; then
+        ( execute_step "$@" ) <&0 &
+    else
+        log_file="$report_directory/$id.log"
+        printf 'Task log: %s\n' "$log_file"
+        # A regular file cannot leave later tasks waiting on a daemon's open pipe.
+        ( execute_step "$@" ) <&0 >"$log_file" 2>&1 &
+    fi
+    child=$!
+    active_step_child="$child"
+    if [[ -n "$log_file" ]]; then
+        wait_step "$child" "$log_file" "$started"
+    fi
+    wait "$child" || status=$?
+    active_step_child=""
+    if [[ -n "$log_file" ]]; then
+        if ! cat "$log_file"; then
+            printf 'Could not read the log for %s.\n' "$id" >&2
+            if (( status == 0 )); then
+                status=1
+            fi
+        fi
+    fi
+    if (( status == 130 || status == 143 )); then
+        exit "$status"
+    fi
+    if [[ "$id" == zsh-check ]] && (( status != 0 )); then
+        if restore_step_configuration zsh-config; then
+            step_notes[zsh-config]="Restored pre-run files after zsh validation failed."
+        else
+            step_notes[zsh-config]="Validation failed; inspect per-run backups for incomplete restoration."
+        fi
+        step_status[zsh-config]=failed
+    fi
+    if [[ -f "$report_directory/$id.blocked" ]]; then
+        step_status["$id"]=blocked
+        step_notes["$id"]="$(<"$report_directory/$id.blocked")"
+    elif (( status == 0 )) && [[ -f "$report_directory/$id.skipped" ]]; then
+        step_status["$id"]=skipped
+        step_notes["$id"]="$(<"$report_directory/$id.skipped")"
+    elif (( status == 0 )); then
+        step_status["$id"]=success
+        step_notes["$id"]=""
+    else
+        step_status["$id"]=failed
+        step_notes["$id"]="Exit $status."
+    fi
+    printf '%s: %s (%ss elapsed)\n' "${step_status[$id]^^}" "$label" "$((SECONDS - started))"
+    if [[ "${step_status[$id]}" == failed || "${step_status[$id]}" == blocked ]]; then
+        if [[ "$id" != login-* ]]; then
+            step_notes["$id"]+=" Log: $log_file"
+        fi
+        printf '%s\n' "${step_notes[$id]}" >&2
+    fi
+    return 0
+}
+
+skip_step() {
+    local id="$1" label="$2" reason="$3"
+    step_order+=("$id")
+    step_labels["$id"]="$label"
+    step_status["$id"]=skipped
+    step_notes["$id"]="$reason"
+    show_progress "$label"
+    printf 'SKIPPED: %s\n' "$reason"
+}
+
+print_step_recovery() {
+    local id="$1" package=""
+    printf '           Manual recovery (fix prerequisites/conflicts first):\n'
+    if [[ -f "$report_directory/$id.log" ]]; then
+        printf '             tail -n 80 -- %q\n' "$report_directory/$id.log"
+    fi
+    case "$id" in
+        sudo)
+            echo '             sudo -v'
+            ;;
+        apt-update)
+            echo '             sudo apt-get update -o APT::Update::Error-Mode=any'
+            ;;
+        apt-upgrade)
+            echo '             sudo apt-get upgrade --no-remove'
+            ;;
+        curl) package="curl ca-certificates" ;;
+        git) package=git ;;
+        system-tools) package="procps util-linux" ;;
+        python3) package=python3 ;;
+        python) package=python-is-python3 ;;
+        pip) package=python3-pip ;;
+        venv) package=python3-venv ;;
+        zsh) package=zsh ;;
+        tmux) package=tmux ;;
+        workiq-runtime) package="libwebkit2gtk-4.1-0 libsecret-1-0" ;;
+        gh-aw)
+            echo '             gh --version'
+            if write_gh_aw_retry; then
+                printf '             bash %q\n' "$report_directory/gh-aw-retry.sh"
+                echo '           Retries only gh-aw with the same pinned binary, SHA-256 checks and mirror mode.'
+                echo '           Removes only an empty leftover directory; preserves existing files and symlinks.'
+            else
+                echo '           Could not save the standalone gh-aw retry script; inspect the error above.'
+            fi
+            ;;
+        github-cli)
+            echo '             command -v gh'
+            echo '             gh --version'
+            echo '           Missing gh: use the official Linux installation instructions:'
+            echo '             https://github.com/cli/cli/blob/trunk/docs/install_linux.md'
+            echo '           Do not replace an existing custom installation or add a conflicting apt source.'
+            ;;
+        azure-cli)
+            echo '             az version'
+            echo '           If absent and the Microsoft apt source is already configured:'
+            echo '             sudo apt-get install --no-upgrade --no-remove azure-cli'
+            echo '           Otherwise follow https://learn.microsoft.com/cli/azure/install-azure-cli-linux'
+            ;;
+        node|npm)
+            echo '             node --version'
+            echo '             npm --version'
+            echo '             npm config get prefix'
+            echo '           Use the original Node installer to repair it; preserve its version and prefix.'
+            echo '           Node must be >=22 for Copilot/WorkIQ and >=24 for agent-browser.'
+            ;;
+        workiq)
+            echo '             command -v workiq'
+            echo '             timeout --foreground --kill-after=3s 15s workiq --version </dev/null'
+            echo '           Only if missing, install the pinned global package:'
+            echo '             npm install --global --prefix "$HOME/.local" --engine-strict --ignore-scripts @microsoft/workiq@1.0.1'
+            echo '           For that user-local npm installation only, select the native Linux entry:'
+            echo '             chmod u+x "$HOME/.local/lib/node_modules/@microsoft/workiq/bin/linux-$(node -p process.arch)/workiq"'
+            echo '             ln -sfn "$HOME/.local/lib/node_modules/@microsoft/workiq/bin/linux-$(node -p process.arch)/workiq" "$HOME/.local/bin/workiq"'
+            echo '           Do not replace a custom entry or reinstall a different existing WorkIQ version.'
+            ;;
+        copilot)
+            echo '             command -v copilot'
+            echo '             timeout --foreground --kill-after=5s 15s copilot --version </dev/null'
+            echo '             npm list --global --depth=0 @github/copilot'
+            echo '           For a missing platform package, repair the SAME installed Copilot version with its original package manager.'
+            echo '           A timeout or unknown error is not permission to uninstall/upgrade Copilot.'
+            ;;
+        agent-browser)
+            echo '             agent-browser --version'
+            echo '             npm list --global --depth=0 agent-browser'
+            echo '           Repair the existing version with its original package manager; inspect Release-download failures in the task log.'
+            ;;
+        npm-mirror)
+            echo '             npm config get registry'
+            echo '             npm config set registry https://registry.npmmirror.com --location=user'
+            ;;
+        pip-mirror)
+            echo '             python3 -m pip config debug'
+            echo '             python3 -m pip config --user set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple'
+            ;;
+        login-github)
+            echo '             gh auth status --hostname github.com'
+            echo '             gh auth login --hostname github.com -p ssh --web'
+            echo '           Log in only if needed; keep the intended account and existing Git identity.'
+            ;;
+        login-azure)
+            printf '             az login'
+            if (( ${#azure_login_arguments[@]} > 0 )); then
+                printf ' %q' "${azure_login_arguments[@]}"
+            fi
+            printf '\n'
+            ;;
+        login-copilot)
+            echo '             copilot login --device-code'
+            echo '           Requires a working system keyring; do not enable plaintext token storage.'
+            ;;
+        login-workiq)
+            echo '             sudo apt-get install --no-upgrade --no-remove libwebkit2gtk-4.1-0 libsecret-1-0'
+            echo '             workiq config show'
+            echo '           If the EULA has not already been accepted:'
+            echo '             workiq accept-eula'
+            echo '             workiq auth login'
+            echo '           Confirm "Logged in as ..."; upstream may return exit zero on login failure.'
+            ;;
+        docker)
+            echo '             docker --version'
+            echo '             docker info'
+            echo '           Inspect the task log and repair the configured backend; do not replace a custom Docker installation.'
+            ;;
+        docker-compose|docker-buildx)
+            echo '             dpkg-query -S "$(readlink -f "$(command -v docker)")"'
+            if [[ "$id" == docker-compose ]]; then
+                echo '             docker compose version'
+                echo '           For docker-ce-cli: sudo apt-get install --no-upgrade --no-remove docker-compose-plugin'
+                echo '           For Ubuntu docker.io: sudo apt-get install --no-upgrade --no-remove docker-compose-v2'
+            else
+                echo '             docker buildx version'
+                echo '           For docker-ce-cli: sudo apt-get install --no-upgrade --no-remove docker-buildx-plugin'
+                echo '           For Ubuntu docker.io: sudo apt-get install --no-upgrade --no-remove docker-buildx'
+            fi
+            echo '           Choose only the package matching the existing Docker CLI; custom backends use their original installer.'
+            ;;
+        bash)
+            echo '             bash -n "$HOME/.bashrc"'
+            echo '           Inspect the reported conflict and per-run backups before editing managed blocks.'
+            ;;
+        zsh-config|zsh-check|login-shell)
+            echo '             zsh -f -n "${ZDOTDIR:-$HOME}/.zshrc"'
+            echo '           Inspect the task log/backups; verify interactive zsh before changing the login shell.'
+            ;;
+        tmux-config)
+            echo '             tmux show-options -g default-shell'
+            echo '           Inspect ~/.tmux.conf and its backups; do not restart an existing tmux server to force success.'
+            ;;
+        *)
+            echo '           No safe generic install command: inspect the task log and repair the reported prerequisite or configuration conflict.'
+            echo '           Keep custom files, pinned downloads and account settings; do not overwrite them to force success.'
+            ;;
+    esac
+    if [[ -n "$package" ]]; then
+        printf '             sudo apt-get install --no-upgrade --no-remove %s\n' "$package"
+        echo '           Already-installed packages are kept; repair apt sources/locks first if the log reports an apt error.'
+    fi
+}
+
+print_setup_summary() {
+    local id
+    printf '\n%s\n' "Setup task results:"
+    for id in "${step_order[@]}"; do
+        printf '  %-8s %-24s %s\n' "${step_status[$id]^^}" "$id" "${step_labels[$id]}"
+        if [[ -n "${step_notes[$id]}" ]]; then
+            printf '           %s\n' "${step_notes[$id]}"
+        fi
+        if [[ "${step_status[$id]}" == failed || "${step_status[$id]}" == blocked ]]; then
+            print_step_recovery "$id"
+        fi
+    done
+    printf '\nLogs and this summary: %s\n' "$report_directory"
+}
+
+write_mirror_config_helper() {
+    [[ ! -s "$run_state/mirror-config.py" ]] || return 0
+    cat > "$run_state/mirror-config.py" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from urllib.parse import urlsplit
+
+
+def backup(path):
+    if path.is_symlink():
+        raise SystemExit(f"Refusing symlinked mirror configuration: {path}")
+    saved = path.with_name(path.name + ".wsl-bootstrap.bak")
+    if saved.is_symlink():
+        raise SystemExit(f"Refusing symlinked mirror backup: {saved}")
+    if path.exists() and not saved.exists():
+        shutil.copy2(path, saved)
+
+
+def save(path, content, validator=None):
+    if path.is_symlink():
+        raise SystemExit(f"Refusing symlinked mirror configuration: {path}")
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        if path.exists():
+            metadata = path.stat()
+            os.chmod(staged, metadata.st_mode & 0o777)
+            os.chown(staged, metadata.st_uid, metadata.st_gid)
+        else:
+            os.chmod(staged, 0o644)
+        if validator:
+            subprocess.run([validator, "--validate", "--config-file", staged],
+                           check=True, stdout=sys.stderr)
+        backup(path)
+        os.replace(staged, path)
+    finally:
+        if os.path.exists(staged):
+            os.unlink(staged)
+    return True
+
+
+mode = sys.argv[1]
+if mode == "backup":
+    backup(Path(sys.argv[2]))
+elif mode == "apt":
+    arch, docker_base = sys.argv[2:4]
+    ubuntu_base = "https://mirrors.ustc.edu.cn/" + ("ubuntu" if arch == "amd64" else "ubuntu-ports")
+
+    def replace_urls(text, security=False):
+        def replace(match):
+            original = match.group()
+            url = urlsplit(original)
+            if not security and (
+                re.fullmatch(r"(?:[a-z0-9-]+\.)?archive\.ubuntu\.com", url.hostname or "")
+                and url.path.rstrip("/") == "/ubuntu"
+                or url.hostname == "ports.ubuntu.com" and url.path.rstrip("/") == "/ubuntu-ports"
+            ):
+                return ubuntu_base + ("/" if url.path.endswith("/") else "")
+            if url.hostname == "download.docker.com" and url.path.startswith("/linux/ubuntu"):
+                return docker_base + url.path
+            return original
+        return "".join(
+            line if line.lstrip().startswith("#") else
+            re.sub(r'https?://[^\s\[\]<>"]+', replace, line)
+            for line in text.splitlines(keepends=True)
+        )
+
+    def stanza(block):
+        if not block.strip() or all(
+            not line.strip() or line.lstrip().startswith("#") for line in block.splitlines()
+        ):
+            return block
+        if re.search(r"(?m)^URIs:.*https?://deb\.nodesource\.com/", block):
+            if re.search(r"(?mi)^Enabled:", block):
+                return re.sub(r"(?mi)^Enabled:.*$", "Enabled: no", block)
+            return block.rstrip("\n") + "\nEnabled: no\n"
+        suites = re.search(r"(?m)^Suites:[ \t]*([^\n]*(?:\n[ \t]+[^\n]*)*)", block)
+        if not suites:
+            return replace_urls(block)
+        values = suites.group(1).split()
+        security = [value for value in values if value.endswith("-security")]
+        ordinary = [value for value in values if not value.endswith("-security")]
+        if security and ordinary:
+            def subset(values):
+                return block[:suites.start()] + "Suites: " + " ".join(values) + block[suites.end():]
+            return replace_urls(subset(ordinary)) + "\n\n" + replace_urls(subset(security), True)
+        return replace_urls(block, bool(security))
+
+    sources = [Path("/etc/apt/sources.list")]
+    directory = Path("/etc/apt/sources.list.d")
+    sources += sorted(directory.glob("*.list")) + sorted(directory.glob("*.sources"))
+    changed = 0
+    for path in sources:
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink():
+            raise SystemExit(f"Refusing symlinked apt source: {path}")
+        original = path.read_text(encoding="utf-8")
+        if path.suffix == ".sources":
+            parts = re.split(r"(\n[ \t]*\n)", original)
+            updated = "".join(stanza(part) if index % 2 == 0 else part
+                              for index, part in enumerate(parts))
+        else:
+            lines = []
+            for line in original.splitlines(keepends=True):
+                active = line.split("#", 1)[0]
+                node_source = any(
+                    urlsplit(url).hostname == "deb.nodesource.com"
+                    for url in re.findall(r'https?://[^\s\[\]<>"]+', active)
+                )
+                if re.match(r"^\s*deb(?:-src)?\s", active) and node_source:
+                    lines.append("# WSL CLI bootstrap: NodeSource disabled for mirrored Node binaries\n# " + line)
+                else:
+                    security = any(value.endswith("-security") for value in active.split())
+                    lines.append(replace_urls(line, security))
+            updated = "".join(lines)
+        if save(path, updated):
+            print(f"Configured China apt mirror: {path}")
+            changed += 1
+    if not changed:
+        print("Apt mirror settings are unchanged; existing custom sources were preserved.")
+elif mode == "docker":
+    mirror, validator = sys.argv[2:4]
+    path = Path("/etc/docker/daemon.json")
+    if path.is_symlink():
+        raise SystemExit("Refusing symlinked Docker daemon configuration.")
+    configuration = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(configuration, dict):
+        raise SystemExit("Docker daemon configuration must be a JSON object.")
+    mirrors = configuration.get("registry-mirrors", [])
+    if not isinstance(mirrors, list) or not all(isinstance(value, str) for value in mirrors):
+        raise SystemExit("Docker registry-mirrors must be a list of strings.")
+    if mirror in mirrors:
+        print("unchanged")
+    else:
+        configuration["registry-mirrors"] = mirrors + [mirror]
+        changed = save(path, json.dumps(configuration, indent=2) + "\n", validator)
+        print("changed" if changed else "unchanged")
+else:
+    raise SystemExit(f"Unknown mirror configuration mode: {mode}")
+PY
+}
+
+configure_china_apt_sources() {
+    if (( china_mirror_requested == 0 )); then
+        return
+    fi
+    available python3 || die "--china-mirror requires Python 3 for safe apt source editing; install python3 first."
+    require_step sudo
+    write_mirror_config_helper
+    sudo -n python3 "$run_state/mirror-config.py" apt "$arch" "$docker_package_base"
+}
+
+apt_updated=0
+prepare_apt() {
+    echo "Updating Ubuntu package metadata..."
+    retry "apt update" timeout --kill-after=5s 90s sudo -n apt-get \
+        -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+        -o DPkg::Lock::Timeout=20 \
+        update -o APT::Update::Error-Mode=any \
+        || die "apt update failed. Repair the existing apt sources/network and rerun."
+    touch "$run_state/apt-ready"
+    apt_updated=1
+}
+
+upgrade_apt_packages() {
+    local plan
+    plan="$(timeout --kill-after=5s 20s apt-get --simulate upgrade)" \
+        || die "Cannot plan apt upgrade; repair the package state before rerunning."
+    if ! grep -Eq '^(Inst|Conf) ' <<< "$plan"; then
+        echo "Installed apt packages are up to date; skipping upgrade."
+        return
+    fi
+    download_apt_packages 300s upgrade -y
+    retry "apt upgrade" run_package_command sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
+        apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+        -o DPkg::Lock::Timeout=20 \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold --no-download upgrade -y \
+        || die "apt upgrade failed. Repair the package state and rerun."
+}
+
+download_apt_packages() {
+    local limit="$1"
+    shift
+    echo "APT download-only phase ($limit per attempt, two attempts); dpkg will not run."
+    # Put timeout after sudo so it can signal all privileged acquisition helpers.
+    retry "Downloading apt archives ($limit limit)" sudo -n \
+        timeout --kill-after=5s "$limit" \
+        env DEBIAN_FRONTEND=noninteractive apt-get \
+        -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+        -o DPkg::Lock::Timeout=20 --download-only "$@" \
+        || die "APT archive download failed or timed out. Check the URL/network/proxy in this log and rerun. No package installation was started by this task; cached archives are retained."
+    echo "APT archives ready; installing from cache without network downloads."
+}
+
+run_package_command() {
+    local status=0
+    touch "$run_state/package-transaction" || return
+    "$@" || status=$?
+    rm -f -- "$run_state/package-transaction" || return
+    return "$status"
+}
+
+invalidate_apt_metadata() {
+    apt_updated=0
+    rm -f -- "$run_state/apt-ready"
+}
+
+publish_apt_file() {
+    local staged="$1" destination="$2"
+    [[ ! -L "$destination" ]] || die "Refusing a symlinked apt file: $destination"
+    if [[ -e "$destination" ]]; then
+        cmp -s "$staged" "$destination" \
+            || die "Existing apt configuration differs; review it before rerunning: $destination"
+    else
+        # Roll back only newly created files if metadata cannot be verified.
+        provisional_apt_files+=("$destination")
+        sudo -n install -m 0644 "$staged" "$destination"
+    fi
+}
+
+install_packages() {
+    local plan package missing=0
+    local -a options=()
+    if [[ "${1:-}" == --no-install-recommends ]]; then
+        options+=(--no-install-recommends)
+        shift
+    fi
+    for package in "$@"; do
+        if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null)" != installed ]]; then
+            missing=1
+            break
+        fi
+    done
+    if (( missing == 0 )); then
+        echo "Required apt packages are already configured: $*"
+        return
+    fi
+    require_step apt-update
+    if (( apt_updated == 0 )); then
+        echo "Refreshing package metadata after repository configuration..."
+        retry "apt metadata refresh" timeout --kill-after=5s 90s sudo -n apt-get \
+            -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o DPkg::Lock::Timeout=20 \
+            update -o APT::Update::Error-Mode=any \
+            || die "Cannot install $*: apt-get update failed after repository configuration."
+        apt_updated=1
+        touch "$run_state/apt-ready"
+        provisional_apt_files=()
+        docker_source_created=0
+        docker_key_created=0
+    fi
+    plan="$(timeout --kill-after=5s 20s apt-get --simulate --no-upgrade --no-remove "${options[@]}" install "$@")" \
+        || die "Cannot plan installation of $*; repair the existing apt package state."
+    if grep -Eq '^Inst [^ ]+ \[' <<< "$plan"; then
+        die "Installing $* would change existing package versions. Review dependencies manually."
+    fi
+    if ! grep -Eq '^(Inst|Conf) ' <<< "$plan"; then
+        echo "Required apt packages are already configured: $*"
+        return
+    fi
+    download_apt_packages 120s install -y --no-upgrade --no-remove "${options[@]}" "$@"
+    retry "Installing apt packages: $*" run_package_command sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
+        apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+        -o DPkg::Lock::Timeout=20 \
+        -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold --no-download install -y --no-upgrade --no-remove "${options[@]}" "$@" \
+        || die "Installing $* failed; repair the apt package state before rerunning."
+}
+
+ensure_command() {
+    local command_name="$1" package="$2"
+    shift 2
+    if (( $# == 0 )); then
+        set -- --version
+    fi
+    if ! check_existing "$command_name" "$@"; then
+        install_packages "$package"
+        available "$command_name" || die "$package did not provide $command_name on PATH."
+        "$command_name" "$@" >/dev/null \
+            || die "Installed $command_name is not usable; repair $package before rerunning."
+    fi
+}
+
+ensure_user_npm_prefix() {
+    local configured_prefix
+    mkdir -p "$HOME/.local/bin"
+    if [[ "$(npm config get prefix)" != "$HOME/.local" ]]; then
+        npm config set prefix "$HOME/.local" --location=user
+    fi
+    configured_prefix="$(npm config get prefix)"
+    [[ "$configured_prefix" == "$HOME/.local" ]] \
+        || die "npm global prefix is $configured_prefix, expected $HOME/.local."
+}
+
+download() {
+    require_commands curl
+    local url="$1" destination="$2" source status=0
+    local -a sources=("$url")
+    local -a options=(--fail --show-error --silent --location
+        --connect-timeout 10 --max-time 120 --speed-limit 1024 --speed-time 20)
+    if (( china_mirror_requested == 1 )); then
+        case "$url" in
+            https://github.com/*|https://raw.githubusercontent.com/*|https://codeload.github.com/*)
+                sources=("https://gh-proxy.org/$url" "$url")
+                ;;
+        esac
+    fi
+    for source in "${sources[@]}"; do
+        echo "Downloading $source (120-second limit per attempt)..."
+        status=0
+        retry "Downloading $source" curl "${options[@]}" "$source" -o "$destination" || status=$?
+        (( status == 0 )) && return
+    done
+    die "Cannot download $url from the listed sources. Check network/proxy access and rerun setup."
+}
+
+# Replace only our block (optionally last), keep one backup, and leave identical files alone.
+write_managed_block() {
+    local status=0
+    echo "Updating managed configuration: $1"
+    /usr/bin/timeout --kill-after=5s 30s python3 - "$1" "$2" "$tmp/config-block" "${3:-in-place}" \
+        "${report_directory:-$tmp}/config-backups/${current_step:-standalone}" <<'PY' || status=$?
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+path = Path(sys.argv[1]).expanduser()
+label = sys.argv[2]
+block = Path(sys.argv[3]).read_text(encoding="utf-8")
+placement = sys.argv[4]
+if placement not in ("in-place", "last", "replace"):
+    raise SystemExit(f"Unknown managed block placement: {placement}")
+if path.is_symlink():
+    raise SystemExit(f"Refusing to replace symlinked configuration: {path}")
+if path.exists() and not path.is_file():
+    raise SystemExit(f"Refusing non-regular configuration: {path}")
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+begin = f"# >>> WSL CLI bootstrap: {label} >>>"
+end = f"# <<< WSL CLI bootstrap: {label} <<<"
+pattern = re.compile(r"^" + re.escape(begin) + r"\n.*?^" + re.escape(end) + r"(?:\n|$)", re.M | re.S)
+replacement = f"{begin}\n{block.rstrip()}\n{end}\n"
+has_block = begin in text or end in text
+if has_block:
+    if text.count(begin) != 1 or text.count(end) != 1 or not pattern.search(text):
+        raise SystemExit(f"Malformed managed {label} block in {path}; refusing to overwrite it.")
+if placement == "replace":
+    updated = replacement
+elif placement == "last":
+    remaining = pattern.sub("", text)
+    updated = remaining + ("" if remaining.endswith("\n") else "\n") + replacement if remaining else replacement
+elif has_block:
+    updated = pattern.sub(lambda match: replacement, text)
+else:
+    updated = text + ("\n" if text.endswith("\n") else "\n\n") + replacement if text else replacement
+if updated == text:
+    sys.exit(0)
+backup = path.with_name(path.name + ".wsl-bootstrap.bak")
+if backup.is_symlink() or (backup.exists() and not backup.is_file()):
+    raise SystemExit(f"Refusing unsafe configuration backup: {backup}")
+path.parent.mkdir(parents=True, exist_ok=True)
+fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(updated)
+    shell = ("bash" if path.name == ".bashrc" else
+             "zsh" if path.name in (".zshenv", ".zprofile", ".zlogin", ".zshrc") or path.suffix == ".zsh"
+             else None)
+    if shell:
+        subprocess.run(["/usr/bin/timeout", "--kill-after=3s", "10s", shell, "-f", "-n", staged],
+                       check=True)
+    snapshots = Path(sys.argv[5])
+    snapshots.mkdir(parents=True, exist_ok=True, mode=0o700)
+    key = hashlib.sha256(str(path.absolute()).encode()).hexdigest()
+    manifest = snapshots / (key + ".json")
+    saved = snapshots / (key + ".before")
+    if manifest.exists():
+        record = json.loads(manifest.read_text())
+    else:
+        record = {"path": str(path.absolute()), "existed": path.exists()}
+        if path.exists():
+            shutil.copy2(path, saved)
+    record["written_sha256"] = hashlib.sha256(updated.encode()).hexdigest()
+    pending = manifest.with_suffix(".pending")
+    pending.write_text(json.dumps(record), encoding="utf-8")
+    os.replace(pending, manifest)
+    if path.exists() and not backup.exists():
+        shutil.copy2(path, backup)
+    if path.exists():
+        shutil.copymode(path, staged)
+        metadata = path.stat()
+        os.chown(staged, metadata.st_uid, metadata.st_gid)
+    os.replace(staged, path)
+finally:
+    if os.path.exists(staged):
+        os.unlink(staged)
+PY
+    if (( status == 124 || status == 137 )); then
+        die "Writing $1 timed out; check the Python executable and filesystem availability/permissions. Existing configuration was not reset; inspect it before rerunning."
+    elif (( status != 0 )); then
+        return "$status"
+    fi
+}
+
+restore_step_configuration() {
+    local directory="$report_directory/config-backups/$1"
+    [[ -d "$directory" ]] || return 0
+    /usr/bin/timeout --kill-after=5s 30s python3 - "$directory" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+failed = False
+for manifest in Path(sys.argv[1]).glob("*.json"):
+    record = json.loads(manifest.read_text())
+    path = Path(record["path"])
+    saved = manifest.with_suffix(".before")
+    if not record["existed"] and not path.exists() and not path.is_symlink():
+        continue
+    if path.is_symlink() or not path.is_file():
+        print(f"Cannot restore changed/missing configuration: {path}", file=sys.stderr)
+        failed = True
+        continue
+    current = path.read_bytes()
+    if hashlib.sha256(current).hexdigest() != record["written_sha256"]:
+        if record["existed"] and current == saved.read_bytes():
+            continue
+        print(f"Preserving concurrent edits; restore manually from {saved}: {path}", file=sys.stderr)
+        failed = True
+        continue
+    if record["existed"]:
+        fd, staged = tempfile.mkstemp(prefix=".wsl-restore.", dir=path.parent)
+        os.close(fd)
+        try:
+            shutil.copy2(saved, staged)
+            metadata = saved.stat()
+            os.chown(staged, metadata.st_uid, metadata.st_gid)
+            os.replace(staged, path)
+        finally:
+            if os.path.exists(staged):
+                os.unlink(staged)
+    else:
+        path.unlink()
+    print(f"Restored pre-run configuration: {path}")
+sys.exit(1 if failed else 0)
+PY
+}
+
+configure_copilot_aliases() {
+    cat > "$tmp/config-block" <<'ALIASES'
+_wsl_cli_copilot_current() {
+    if [[ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" == true ]]; then
+        if ! git pull; then
+            printf 'Warning: git pull failed; starting Copilot without confirming the repository is up to date.\n' >&2
+        fi
+    fi
+    copilot --yolo "$@"
+}
+alias cc='_wsl_cli_copilot_current'
+alias ccw='_wsl_cli_copilot_current -w'
+_wsl_cli_copilot_tmp() (
+    local workspace
+    workspace="$(mktemp -d -t copilot.XXXXXXXXXX)" || return
+    cd -- "$workspace" || return
+    printf 'Copilot temporary workspace: %s\n' "$PWD"
+    COPILOT_ALLOW_ALL=true copilot --yolo "$@"
+)
+alias dd='_wsl_cli_copilot_tmp'
+ALIASES
+    write_managed_block "$1" "Copilot shortcuts" last
+}
+
+install_node_from_mirror() {
+    local release node_arch installation tool archive
+    local -a checksums=()
+    case "$arch" in
+        amd64) node_arch=x64 ;;
+        arm64) node_arch=arm64 ;;
+        *) die "Unsupported architecture for mirrored Node: $arch" ;;
+    esac
+    download "$node_dist_base/index.json" "$tmp/node-index.json"
+    release="$(python3 - "$tmp/node-index.json" "$node_arch" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+releases = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+versions = []
+for release in releases:
+    version = release.get("version", "")
+    if release.get("lts") and re.fullmatch(r"v\d+\.\d+\.\d+", version):
+        parts = tuple(map(int, version[1:].split(".")))
+        if parts[0] >= 22 and "linux-" + sys.argv[2] in release.get("files", []):
+            versions.append(parts)
+if not versions:
+    raise SystemExit("No compatible Node LTS binary is available from the mirror.")
+print("v" + ".".join(map(str, max(versions))))
+PY
+)"
+    installation="$HOME/.local/share/wsl-bootstrap/node-$release-linux-$node_arch"
+    if [[ -e "$installation" || -L "$installation" ]]; then
+        [[ -d "$installation" && ! -L "$installation" ]] \
+            || die "Unexpected managed Node installation: $installation"
+        [[ "$("$installation/bin/node" --version)" == "$release" ]] \
+            || die "The managed Node installation is incomplete; review $installation before rerunning."
+    else
+        # npmmirror omits this file; USTC publishes the matching upstream checksums.
+        download "https://mirrors.ustc.edu.cn/node/$release/SHASUMS256.txt" "$tmp/node-checksums"
+        archive="node-$release-linux-$node_arch.tar.gz"
+        download "$node_dist_base/$release/$archive" "$tmp/node.tar.gz"
+        mapfile -t checksums < <(awk -v archive="$archive" '
+            NF == 2 { name = $2; sub(/^\*/, "", name); if (name == archive) print $1 }
+        ' "$tmp/node-checksums")
+        (( ${#checksums[@]} == 1 )) && [[ "${checksums[0]}" =~ ^[0-9a-f]{64}$ ]] \
+            || die "Missing or ambiguous Node archive checksum."
+        printf '%s  %s\n' "${checksums[0]}" "$tmp/node.tar.gz" \
+            | sha256sum --check --status \
+            || die "Mirrored Node archive checksum mismatch; installation was stopped."
+        mkdir -p "$HOME/.local/share/wsl-bootstrap"
+        node_stage="$(mktemp -d "$HOME/.local/share/wsl-bootstrap/.node-stage.XXXXXXXX")"
+        tar --extract --gzip --no-same-owner --strip-components=1 \
+            --file "$tmp/node.tar.gz" --directory "$node_stage"
+        [[ "$("$node_stage/bin/node" --version)" == "$release" ]] \
+            || die "Mirrored Node failed its installed-version check."
+        mv -T -- "$node_stage" "$installation"
+        node_stage=""
+    fi
+    mkdir -p "$HOME/.local/bin"
+    for tool in node npm npx; do
+        if [[ -e "$HOME/.local/bin/$tool" || -L "$HOME/.local/bin/$tool" ]]; then
+            [[ "$(readlink -m "$HOME/.local/bin/$tool")" == "$(readlink -m "$installation/bin/$tool")" ]] \
+                || die "Refusing to replace an existing user-local $tool."
+        else
+            ln -s "$installation/bin/$tool" "$HOME/.local/bin/$tool"
+        fi
+    done
+    hash -r
+    node --version
+    npm --version
+}
+
+configure_npm_mirror() {
+    local configured
+    if (( china_mirror_requested == 0 )); then
+        return
+    fi
+    require_commands npm python3
+    configured="$(npm config get registry)" || die "Cannot read the npm registry configuration."
+    if [[ "${configured%/}" != "${npm_mirror%/}" ]]; then
+        python3 "$run_state/mirror-config.py" backup "$HOME/.npmrc"
+        npm config set registry "$npm_mirror" --location=user
+    fi
+    configured="$(npm config get registry)" || die "Cannot verify the npm mirror configuration."
+    [[ "${configured%/}" == "${npm_mirror%/}" ]] \
+        || die "An npm environment override prevents the configured China mirror from taking effect."
+}
+
+configure_pip_mirror() {
+    local configured pip_configuration
+    if (( china_mirror_requested == 0 )); then
+        return
+    fi
+    require_commands python3
+    python3 -m pip config --user list >/dev/null \
+        || die "Cannot read pip configuration; existing settings were not replaced."
+    if configured="$(python3 -m pip config --user get global.index-url 2>/dev/null)" \
+        && [[ "${configured%/}" == "${pip_mirror%/}" ]]; then
+        echo "Keeping the configured TUNA pip mirror."
+    else
+        pip_configuration="${XDG_CONFIG_HOME:-$HOME/.config}/pip/pip.conf"
+        python3 "$run_state/mirror-config.py" backup "$pip_configuration"
+        python3 -m pip config --user set global.index-url "$pip_mirror"
+    fi
+    configured="$(python3 -m pip config --user get global.index-url)" \
+        || die "Cannot verify the pip mirror configuration."
+    [[ "${configured%/}" == "${pip_mirror%/}" ]] || die "The pip mirror setting was not applied."
+}
+
+configure_node_mirror_environment() {
+    if (( china_mirror_requested == 0 )); then
+        return
+    fi
+    require_commands python3
+    cat > "$tmp/config-block" <<'MIRROR_ENV'
+export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node
+export NODE_MIRROR=https://npmmirror.com/mirrors/node
+export FNM_NODE_DIST_MIRROR=https://npmmirror.com/mirrors/node
+MIRROR_ENV
+    write_managed_block "$HOME/.local/share/wsl-bootstrap/china-mirrors.sh" "China mirrors"
+    source "$HOME/.local/share/wsl-bootstrap/china-mirrors.sh"
+    echo "Node mirror environment saved; existing shell settings are preserved."
+}
+
+install_agent_browser() {
+    local installation="$HOME/.local/lib/node_modules/agent-browser" binary version="" node_arch
+    local package=agent-browser@0.43.0 repair=0 checksum
+    if available agent-browser; then
+        if timeout --kill-after=5s 15s agent-browser --version; then
+            echo "Keeping existing agent-browser: $(type -P agent-browser)"
+            return
+        fi
+        case "$(readlink -f "$(type -P agent-browser)")" in
+            "$installation/"*) repair=1 ;;
+            *) die "Broken agent-browser is outside the managed npm prefix; repair it using its original installer." ;;
+        esac
+    fi
+    if (( repair == 1 )) || ! available agent-browser; then
+        require_commands node npm
+        if (( repair == 1 )); then
+            version="$(node -e 'const p=require(process.argv[1]); if(p.name!=="agent-browser")process.exit(1); console.log(p.version)' \
+                "$installation/package.json")" || die "Cannot identify the managed agent-browser installation."
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+                || die "Invalid managed agent-browser version."
+            package="agent-browser@$version"
+            echo "Repairing the managed agent-browser $version without upgrading it."
+        fi
+        if (( china_mirror_requested == 1 )); then
+            require_step npm-mirror
+        fi
+        require_agent_browser_node
+        ensure_user_npm_prefix
+        echo "Installing/checking the managed agent-browser CLI..."
+        if (( china_mirror_requested == 1 )); then
+            # Only independently pinned Release assets may be fetched through mirrors.
+            if (( repair == 1 )) && [[ "$version" != 0.43.0 ]]; then
+                die "No trusted agent-browser Release checksum is pinned for $version; repair that version with its original package manager."
+            fi
+            # Bound the release download instead of letting postinstall fetch without a timeout.
+            retry "Installing agent-browser package" timeout --kill-after=5s 180s npm install \
+                --global --engine-strict --include=optional --ignore-scripts "$package"
+            node_arch="$(node -p 'process.arch')"
+            case "$node_arch" in
+                x64|arm64) ;;
+                *) die "Unsupported Node architecture for agent-browser: $node_arch" ;;
+            esac
+            binary="$installation/bin/agent-browser-linux-$node_arch"
+            version="$(node -p 'require(process.argv[1]).version' "$installation/package.json")"
+            [[ "$version" == 0.43.0 ]] || die "Unexpected agent-browser package version; refusing an unverified native binary."
+            case "$node_arch" in
+                x64) checksum=8e69c9fb662514c9cf36e4911e94e913742ba066e55102486350e049dd847612 ;;
+                arm64) checksum=34be55c2b92d8d199fb9d1d62a905ee5b6ac5b1f3e8c24e5b20597f370d905e5 ;;
+            esac
+            download_verified_archive \
+                "https://github.com/vercel-labs/agent-browser/releases/download/v$version/agent-browser-linux-$node_arch" \
+                "$checksum" "$tmp/agent-browser-native"
+            install -m 0755 "$tmp/agent-browser-native" "$binary"
+            timeout --kill-after=5s 30s npm rebuild --global --ignore-scripts=false \
+                --allow-scripts=agent-browser agent-browser \
+                || die "agent-browser's official postinstall failed or timed out."
+        else
+            retry "Installing agent-browser" timeout --kill-after=5s 180s npm install --global --engine-strict \
+                --include=optional --ignore-scripts=false --allow-scripts=agent-browser "$package"
+            if (( repair == 1 )); then
+                timeout --kill-after=5s 180s npm rebuild --global --ignore-scripts=false \
+                    --allow-scripts=agent-browser agent-browser \
+                    || die "Repairing agent-browser's native binary failed or timed out."
+            fi
+        fi
+        hash -r
+        available agent-browser || die "agent-browser was not installed on the native Linux PATH."
+        timeout --kill-after=5s 15s agent-browser --version \
+            || die "Installed agent-browser is not usable; check its native binary and platform compatibility."
+    fi
+}
+
+install_default_browser_libraries() {
+    # Match the upstream Chrome-for-Testing dependency set without running its
+    # bundled apt transaction inside the browser download timeout.
+    local suffix=""
+    [[ "$VERSION_ID" == 22.04 ]] || suffix=t64
+    install_packages libxcb-shm0 libx11-xcb1 libx11-6 libxcb1 libxext6 libxrandr2 \
+        libxcomposite1 libxcursor1 libxdamage1 libxfixes3 libxi6 "libgtk-3-0$suffix" \
+        libpangocairo-1.0-0 libpango-1.0-0 "libatk1.0-0$suffix" libcairo-gobject2 \
+        libcairo2 libgdk-pixbuf-2.0-0 libxrender1 "libasound2$suffix" libfreetype6 \
+        libfontconfig1 libdbus-1-3 libnss3 libnss3-tools libnspr4 \
+        "libatk-bridge2.0-0$suffix" libdrm2 libxkbcommon0 "libatspi2.0-0$suffix" \
+        "libcups2$suffix" libxshmfence1 libgbm1 fonts-noto-color-emoji fonts-noto-cjk \
+        fonts-freefont-ttf
+}
+
+configure_agent_browser() {
+    require_commands agent-browser
+    local browser directory
+    local version=157.0.8103.38
+    local checksum=8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66
+    if [[ -n "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ]]; then
+        browser="$AGENT_BROWSER_EXECUTABLE_PATH"
+        [[ -f "$browser" && -s "$browser" && -x "$browser" ]] \
+            || block_step "The configured browser executable is missing or not executable: $browser"
+        available "$browser" || block_step "The configured browser is not a native executable: $browser"
+        echo "Keeping the configured automation browser: $browser"
+        return
+    fi
+    for browser in google-chrome google-chrome-stable chromium-browser chromium \
+        brave-browser brave-browser-stable; do
+        if available "$browser"; then
+            echo "Keeping the installed system browser: $(type -P "$browser")"
+            return
+        fi
+    done
+    if [[ "$arch" == arm64 ]]; then
+        block_step "Chrome for Testing has no Linux ARM64 download. Install a native Chromium package before rerunning; no alternative browser was downloaded."
+    fi
+    install_default_browser_libraries
+    for browser in "$HOME/.agent-browser/browsers"/chrome-*/chrome \
+        "$HOME/.agent-browser/browsers"/chrome-*/chrome-linux64/chrome; do
+        if [[ -f "$browser" && -s "$browser" && -x "$browser" ]]; then
+            directory="${browser%/chrome}"
+            if browser_cache_complete "$directory"; then
+                echo "Keeping the complete cached automation browser; no browser network requests are needed."
+                return
+            fi
+            case "$browser" in
+                "$HOME/.agent-browser/browsers/chrome-$version/"*)
+                    echo "The pinned browser cache is incomplete; preparing a verified replacement." ;;
+                *) block_step "Incomplete legacy browser cache: $directory. Inspect or move it aside; it was not overwritten." ;;
+            esac
+        fi
+    done
+    install_default_browser_archive "$version" "$checksum"
+}
+
+browser_cache_complete() {
+    local directory="$1" file
+    for file in chrome chrome_crashpad_handler icudtl.dat resources.pak v8_context_snapshot.bin; do
+        [[ -f "$directory/$file" && -s "$directory/$file" ]] || return 1
+    done
+    [[ -x "$directory/chrome" && -x "$directory/chrome_crashpad_handler" ]]
+}
+
+install_default_browser_archive() {
+    require_commands curl sha256sum python3
+    local version="$1" checksum="$2" installation saved=""
+    installation="$HOME/.agent-browser/browsers/chrome-$version"
+    [[ ! -L "$installation" ]] || block_step "Refusing to replace a symlinked browser cache: $installation"
+    [[ ! -e "$installation" || -d "$installation" ]] \
+        || block_step "Unexpected browser cache path: $installation"
+    download_verified_archive \
+        "https://storage.googleapis.com/chrome-for-testing-public/$version/linux64/chrome-linux64.zip" \
+        "$checksum" "$tmp/chrome.zip" \
+        "https://npmmirror.com/mirrors/chrome-for-testing/$version/linux64/chrome-linux64.zip" 180
+    mkdir -p "${installation%/*}"
+    browser_stage="$(mktemp -d "${installation%/*}/.chrome-stage.XXXXXXXX")"
+    timeout --kill-after=5s 120s python3 - "$tmp/chrome.zip" "$browser_stage" <<'PY'
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import stat
+import sys
+import zipfile
+
+root = Path(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for entry in archive.infolist():
+        path = PurePosixPath(entry.filename)
+        mode = entry.external_attr >> 16
+        if (path.is_absolute() or ".." in path.parts or
+                not path.parts or path.parts[0] != "chrome-linux64" or
+                stat.S_ISLNK(mode) or
+                (stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR))):
+            raise SystemExit(f"Unexpected Chrome archive member: {entry.filename}")
+        destination = root.joinpath(*path.parts)
+        if entry.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(entry) as source, destination.open("xb") as output:
+            shutil.copyfileobj(source, output)
+        os.chmod(destination, 0o755 if mode & 0o111 else 0o644)
+PY
+    browser_cache_complete "$browser_stage/chrome-linux64" \
+        || die "The verified Chrome archive did not produce a complete browser cache."
+    if [[ -d "$installation" ]]; then
+        saved="$(mktemp -d "${installation%/*}/.chrome-$version.incomplete.XXXXXXXX")"
+        mv -T -- "$installation" "$saved"
+        echo "Preserved the previous incomplete browser cache: $saved"
+    fi
+    if ! mv -T -- "$browser_stage" "$installation"; then
+        if [[ -n "$saved" ]]; then
+            mv -T -- "$saved" "$installation" \
+                || die "Publishing Chrome and restoring its cache failed; inspect $saved."
+        fi
+        die "Publishing the new Chrome cache failed; the previous cache was preserved."
+    fi
+    browser_stage=""
+    echo "Verified Chrome $version cache installed without launching a browser or changing system browser settings."
+}
+
+install_agent_browser_skill() {
+    local skill_directory="$HOME/.copilot/skills/agent-browser"
+    local skill_file="$skill_directory/SKILL.md" source status actual saved
+    local receipt="$skill_directory/.wsl-bootstrap.sha256"
+    local revision=4f2b61ad674ea8e7928d841a0f1b32842109b1cb
+    local expected=ef7c2da16e25e86b78396bd9a2fd112e23c42cdd2de435197a920b9fc646d1c2
+    local official="https://raw.githubusercontent.com/vercel-labs/agent-browser/$revision/skills/agent-browser/SKILL.md"
+    local -a sources
+    [[ ! -L "$receipt" && ( ! -e "$receipt" || -f "$receipt" ) ]] \
+        || die "Refusing an unsafe skill ownership receipt."
+    if [[ -f "$skill_file" && -s "$skill_file" ]]; then
+        if [[ -L "$skill_directory" || -L "$skill_file" ]]; then
+            echo "Keeping the user-managed symlinked agent-browser skill."
+            return
+        fi
+        [[ ! -L "$receipt" ]] || die "Refusing a symlinked skill ownership receipt."
+        actual="$(sha256sum "$skill_file")"
+        actual="${actual%% *}"
+        if [[ "$actual" == "$expected" ]]; then
+            printf '%s\n' "$expected" > "$receipt"
+            echo "Keeping the matching pinned agent-browser skill without downloading."
+            return
+        fi
+        if [[ ! -f "$receipt" ]]; then
+            echo "Keeping an existing user/legacy skill with unknown ownership; it was not overwritten."
+            return
+        fi
+        IFS= read -r saved <"$receipt"
+        [[ "$actual" == "$saved" ]] \
+            || block_step "The managed agent-browser skill has local edits; preserve or reconcile them before updating."
+    fi
+    require_commands curl
+    [[ ! -L "$skill_directory" && ! -L "$skill_file" ]] \
+        || die "Refusing to replace a missing/empty skill through a symlink: $skill_file"
+    [[ ! -e "$skill_file" || -f "$skill_file" ]] \
+        || die "Refusing a non-regular skill file: $skill_file"
+    sources=("$official" "https://gh-proxy.org/$official")
+    if (( china_mirror_requested == 1 )); then
+        sources=("https://gh-proxy.org/$official" "$official")
+    fi
+    mkdir -p "$skill_directory"
+    skill_stage="$(mktemp -d "$skill_directory/.skill-stage.XXXXXXXX")"
+    echo "Installing the public agent-browser skill file only; no npm install or GitHub repository clone."
+    for source in "${sources[@]}"; do
+        echo "Downloading skill: $source (30-second limit)"
+        status=0
+        curl --fail --show-error --location --connect-timeout 10 --max-time 30 \
+            --speed-limit 1024 --speed-time 15 --max-filesize 1048576 \
+            "$source" -o "$skill_stage/SKILL.md" || status=$?
+        if (( status == 130 || status == 143 )); then
+            exit "$status"
+        fi
+        if (( status != 0 )); then
+            printf 'Skill download failed (exit %s): %s\n' "$status" "$source" >&2
+            continue
+        fi
+        actual="$(sha256sum "$skill_stage/SKILL.md")"
+        if [[ "${actual%% *}" != "$expected" ]]; then
+            printf 'Downloaded skill failed its pinned SHA-256 check: %s\n' "$source" >&2
+            continue
+        fi
+        if [[ -f "$skill_file" && ! -e "$skill_file.wsl-bootstrap.bak" ]]; then
+            [[ ! -L "$skill_file.wsl-bootstrap.bak" ]] || die "Refusing a symlinked skill backup."
+            cp -p "$skill_file" "$skill_file.wsl-bootstrap.bak"
+        fi
+        [[ ! -L "$receipt" ]] || die "Refusing a symlinked skill ownership receipt."
+        chmod 0644 "$skill_stage/SKILL.md"
+        mv -T -- "$skill_stage/SKILL.md" "$skill_file"
+        printf '%s\n' "$expected" > "$skill_stage/checksum"
+        mv -T -- "$skill_stage/checksum" "$receipt"
+        rmdir -- "$skill_stage"
+        skill_stage=""
+        echo "GitHub Copilot agent-browser skill installed in ~/.copilot/skills/agent-browser."
+        return
+    done
+    die "Both public skill download sources failed. Check the logged curl errors and HTTPS/proxy access to raw.githubusercontent.com and gh-proxy.org, then rerun setup."
+}
+
+configure_web_instructions() {
+    require_commands python3
+    cat > "$tmp/config-block" <<'INSTRUCTIONS'
+## Local web application testing
+
+Whenever developing or modifying a web application on this machine, you MUST use
+the installed `agent-browser` CLI for local browser-based testing and validation
+before declaring the work complete.
+
+- Start the application's local development or preview server and wait until it
+  is ready. Bind to `127.0.0.1` by default; do not expose it on all network
+  interfaces unless the user explicitly requests it.
+- Open the actual local application URL with `agent-browser open
+  http://127.0.0.1:<port>`, replacing `<port>` with the server's port. Use
+  `agent-browser snapshot -i` to inspect the page and interact with relevant
+  controls to exercise the changed behavior and key user flows. Take screenshots
+  when useful; consult `agent-browser --help` for additional commands.
+- Fix and re-test any failures. A build, type-check, unit tests, or HTTP requests
+  alone do not replace this local browser validation.
+- Close the test browser session with `agent-browser close`. Report what was
+  exercised and any unresolved problems. If browser validation is blocked, state
+  the blocker explicitly rather than claiming the application was verified.
+INSTRUCTIONS
+    write_managed_block "$HOME/.copilot/copilot-instructions.md" "local web validation with agent-browser"
+    echo "Copilot local web validation instructions saved to ~/.copilot/copilot-instructions.md."
+}
+
+configure_browser() {
+    local powershell opener="$HOME/.local/bin/xdg-open"
+    if [[ -L "$opener" && "$(readlink "$opener")" == wsl-browser ]]; then
+        rm -- "$opener"
+        echo "Removed the legacy bootstrap xdg-open override; native desktop openers are preserved."
+    fi
+    if (( is_wsl == 0 )); then
+        echo "Keeping native Linux browser settings; on headless servers, open login URLs on another computer."
+        return
+    fi
+    powershell="$(/usr/bin/wslpath -u 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')" \
+        || die "Cannot resolve the Windows PowerShell path."
+    [[ -x "$powershell" ]] \
+        || die "Windows browser support requires Windows-drive mounts and enabled WSL interoperability."
+    timeout --kill-after=5s 10s "$powershell" -NoLogo -NoProfile -NonInteractive -Command 'exit 0' </dev/null >/dev/null \
+        || die "Windows PowerShell could not start; enable WSL interoperability before rerunning."
+    mkdir -p "$HOME/.local/bin"
+    cat > "$tmp/wsl-browser" <<'BROWSER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# != 1 ]]; then
+    echo "Usage: wsl-browser <http-or-https-url>" >&2
+    exit 2
+fi
+case "$1" in
+    http://*|https://*) ;;
+    *) echo "Only HTTP and HTTPS browser URLs are supported." >&2; exit 2 ;;
+esac
+powershell="$(/usr/bin/wslpath -u 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')"
+[[ -x "$powershell" ]] || { echo "Windows PowerShell is unavailable; check WSL interoperability." >&2; exit 1; }
+printf '%s' "$1" | "$powershell" -NoLogo -NoProfile -NonInteractive -Command \
+    '$ErrorActionPreference = "Stop"; $url = [Console]::In.ReadToEnd(); Start-Process -FilePath $url'
+BROWSER
+    if [[ -e "$HOME/.local/bin/wsl-browser" || -L "$HOME/.local/bin/wsl-browser" ]]; then
+        [[ ! -L "$HOME/.local/bin/wsl-browser" ]] || die "Refusing to replace a symlinked wsl-browser."
+        if ! cmp -s "$tmp/wsl-browser" "$HOME/.local/bin/wsl-browser"; then
+            [[ -e "$HOME/.local/bin/wsl-browser.wsl-bootstrap.bak" ]] \
+                || cp -p "$HOME/.local/bin/wsl-browser" "$HOME/.local/bin/wsl-browser.wsl-bootstrap.bak"
+        fi
+    fi
+    if ! cmp -s "$tmp/wsl-browser" "$HOME/.local/bin/wsl-browser"; then
+        install -m 0755 "$tmp/wsl-browser" "$HOME/.local/bin/wsl-browser"
+    fi
+    hash -r
+    export BROWSER="$HOME/.local/bin/wsl-browser"
+    export GH_BROWSER="$BROWSER"
+    echo "WSL login-browser bridge configured without changing xdg-open."
+}
+
+install_zsh_plugin() {
+    require_commands git timeout
+    local name="$1" revision="$2" directory="$HOME/.local/share/wsl-bootstrap/plugins/$1"
+    local status installed_revision recorded_revision previous="$directory.wsl-bootstrap.previous"
+    local source="https://github.com/zsh-users/$1.git" fallback
+    fallback="https://gh-proxy.org/$source"
+    if (( china_mirror_requested == 1 )); then
+        local official="$source"
+        source="$fallback"
+        fallback="$official"
+    fi
+    if [[ ! -e "$directory" && ! -L "$directory" && -d "$previous/.git" && ! -L "$previous" ]]; then
+        [[ "$(git -C "$previous" remote get-url origin)" == "https://github.com/zsh-users/$name.git" ]] \
+            || die "Unrecognized plugin recovery directory: $previous"
+        mv -T -- "$previous" "$directory"
+        echo "Recovered the previous $name checkout after an interrupted update."
+    fi
+    if [[ -e "$directory" || -L "$directory" ]]; then
+        [[ -d "$directory/.git" && ! -L "$directory" ]] \
+            || die "Unexpected plugin installation: $directory"
+        [[ "$(git -C "$directory" remote get-url origin)" == "https://github.com/zsh-users/$name.git" ]] \
+            || die "The $name checkout has an unknown origin; it was not overwritten."
+        installed_revision="$(git -C "$directory" rev-parse HEAD)"
+        status="$(git -C "$directory" status --porcelain)" \
+            || die "Cannot inspect the managed $name checkout; its files were not changed."
+        [[ -z "$status" ]] \
+            || die "The managed $name checkout has local changes; refusing to overwrite them."
+        if git -C "$directory" symbolic-ref -q HEAD >/dev/null; then
+            die "The managed $name checkout is on a user-selected branch; refusing to replace it."
+        fi
+        if [[ "$installed_revision" == "$revision" ]]; then
+            echo "Keeping the pinned $name plugin at $revision."
+            return
+        fi
+        if [[ -f "$directory/.git/wsl-bootstrap-revision" && ! -L "$directory/.git/wsl-bootstrap-revision" ]]; then
+            IFS= read -r recorded_revision <"$directory/.git/wsl-bootstrap-revision"
+            [[ "$recorded_revision" == "$installed_revision" ]] \
+                || die "The managed $name revision was changed outside setup; it was preserved."
+        else
+            case "$name:$installed_revision" in
+                zsh-autosuggestions:e52ee8ca55bcc56a17c828767a3f98f22a68d4eb|\
+                zsh-syntax-highlighting:db085e4661f6aafd24e5acb5b2e17e4dd5dddf3e) ;;
+                *) die "Unrecognized legacy $name revision; it was not overwritten." ;;
+            esac
+        fi
+        echo "Updating the clean managed $name checkout to the tested revision $revision."
+    fi
+    mkdir -p "${directory%/*}"
+    plugin_stage="$(mktemp -d "${directory%/*}/.plugin-stage.XXXXXXXX")"
+    git -C "$plugin_stage" init --quiet
+    git -C "$plugin_stage" remote add origin "https://github.com/zsh-users/$name.git"
+    status=0
+    env GIT_TERMINAL_PROMPT=0 timeout --kill-after=5s 30s \
+        git -c http.version=HTTP/1.1 -C "$plugin_stage" fetch --quiet --depth=1 "$source" "$revision" \
+        || status=$?
+    if (( status == 130 || status == 143 )); then
+        exit "$status"
+    fi
+    if (( status != 0 )); then
+        printf 'Downloading %s from %s failed (exit %s); trying %s.\n' \
+            "$name" "$source" "$status" "$fallback" >&2
+        retry "Downloading $name from $fallback" env GIT_TERMINAL_PROMPT=0 timeout --kill-after=5s 30s \
+            git -c http.version=HTTP/1.1 -C "$plugin_stage" fetch --quiet --depth=1 "$fallback" "$revision" \
+            || die "Downloading $name failed through both GitHub and gh-proxy.org; check network/proxy access."
+    fi
+    git -C "$plugin_stage" checkout --quiet --detach "$revision" \
+        || die "Checking out the pinned $name revision failed; rerun setup to retry."
+    [[ -s "$plugin_stage/$name.zsh" ]] || die "The downloaded $name entry point is missing."
+    printf '%s\n' "$revision" > "$plugin_stage/.git/wsl-bootstrap-revision"
+    if [[ -d "$directory" ]]; then
+        if [[ -e "$previous" || -L "$previous" ]]; then
+            [[ -d "$previous/.git" && ! -L "$previous" \
+                && "$(git -C "$previous" remote get-url origin)" == "https://github.com/zsh-users/$name.git" \
+                && -z "$(git -C "$previous" status --porcelain)" ]] \
+                || die "The previous plugin snapshot has unknown ownership/local edits: $previous"
+            rm -r -- "$previous"
+        fi
+        mv -T -- "$directory" "$previous"
+        if ! mv -T -- "$plugin_stage" "$directory"; then
+            mv -T -- "$previous" "$directory"
+            die "Publishing the new $name checkout failed; the previous version was restored."
+        fi
+    else
+        mv -T -- "$plugin_stage" "$directory"
+    fi
+    plugin_stage=""
+}
+
+configure_zsh() {
+    require_commands zsh python3 timeout
+    local zsh_bin startup_directory zdotdir helper_mode=in-place helper_hash
+    zsh_bin="$(type -P zsh)"
+    startup_directory="${ZDOTDIR:-$HOME}"
+    zdotdir="$(timeout 10s "$zsh_bin" -c 'print -r -- "${ZDOTDIR:-$HOME}"')" \
+        || die "Could not determine ZDOTDIR from the existing .zshenv within 10 seconds."
+    [[ "$startup_directory" == /* && "$zdotdir" == /* && "$zdotdir" != *$'\n'* ]] \
+        || die "ZDOTDIR must resolve to one absolute Linux directory."
+    mkdir -p "$startup_directory" "$zdotdir" "$HOME/.local/share/wsl-bootstrap"
+    cat > "$tmp/native-path.zsh" <<'ZSH'
+_wsl_cli_native_path() {
+    emulate -L zsh
+    local entry release
+    local -a native_path
+    release="$(uname -r)" || return
+    for entry in "${path[@]}" "$HOME/.local/bin" "$HOME/bin" \
+        /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
+        [[ -n "$entry" ]] || continue
+        if [[ "${release:l}" == *microsoft* || "${release:l}" == *wsl* ]]; then
+            case "${entry:A}" in
+                /mnt/[a-zA-Z]|/mnt/[a-zA-Z]/*) continue ;;
+            esac
+        fi
+        native_path+=("$entry")
+    done
+    typeset -gU path
+    path=("${native_path[@]}")
+    export PATH
+}
+_wsl_cli_native_path
+unfunction _wsl_cli_native_path
+if [[ -f "$HOME/.local/share/wsl-bootstrap/china-mirrors.sh" ]]; then
+    source "$HOME/.local/share/wsl-bootstrap/china-mirrors.sh"
+fi
+ZSH
+    if (( is_wsl == 1 )) && [[ -x "$HOME/.local/bin/wsl-browser" ]]; then
+        cat >> "$tmp/native-path.zsh" <<'BROWSER_ENV'
+export BROWSER="$HOME/.local/bin/wsl-browser"
+export GH_BROWSER="$BROWSER"
+BROWSER_ENV
+    fi
+    [[ ! -L "$HOME/.local/share/wsl-bootstrap/native-path.zsh" ]] \
+        || die "Refusing a symlinked managed zsh PATH helper."
+    if [[ -f "$HOME/.local/share/wsl-bootstrap/native-path.zsh" ]] \
+        && ! grep -Fq '# >>> WSL CLI bootstrap: native zsh helper >>>' "$HOME/.local/share/wsl-bootstrap/native-path.zsh"; then
+        helper_hash="$(sha256sum "$HOME/.local/share/wsl-bootstrap/native-path.zsh")"
+        case "${helper_hash%% *}" in
+            877b1e2bddbe57e6bf1eaa436f5db64ef4f87407ab8a043f49758f08d49377d7|\
+            7b52bf5b170b1696200f34b6513795e5c2166e3393b04f1be6d1b94abda7f2ac)
+                helper_mode=replace ;;
+            *) die "Unrecognized/edited legacy native-path.zsh; preserve and reconcile it before migrating." ;;
+        esac
+    fi
+    cp "$tmp/native-path.zsh" "$tmp/config-block"
+    write_managed_block "$HOME/.local/share/wsl-bootstrap/native-path.zsh" "native zsh helper" "$helper_mode"
+    printf '%s\n' 'source "$HOME/.local/share/wsl-bootstrap/native-path.zsh"' > "$tmp/config-block"
+    write_managed_block "$startup_directory/.zshenv" "native zsh PATH"
+    write_managed_block "$zdotdir/.zprofile" "native zsh PATH"
+    write_managed_block "$zdotdir/.zlogin" "native zsh PATH"
+    cat > "$tmp/config-block" <<'ZSHRC'
+source "$HOME/.local/share/wsl-bootstrap/native-path.zsh"
+HISTFILE="${HISTFILE:-$HOME/.zsh_history}"
+HISTSIZE=50000
+SAVEHIST=50000
+setopt APPEND_HISTORY SHARE_HISTORY HIST_IGNORE_DUPS HIST_IGNORE_SPACE
+setopt HIST_REDUCE_BLANKS HIST_SAVE_NO_DUPS HIST_VERIFY
+autoload -Uz compinit compaudit
+if ! _wsl_insecure_completion_dirs="$(compaudit 2>/dev/null)"; then
+    print -u2 -r -- "Ignoring insecure zsh completion directories: $_wsl_insecure_completion_dirs"
+fi
+unset _wsl_insecure_completion_dirs
+compinit -i -d "$HOME/.local/share/wsl-bootstrap/zcompdump-$ZSH_VERSION"
+zmodload zsh/complist
+zstyle ':completion:*' menu select
+bindkey -e
+bindkey '^[[A' history-beginning-search-backward
+bindkey '^[[B' history-beginning-search-forward
+bindkey '^[[H' beginning-of-line
+bindkey '^[[F' end-of-line
+bindkey '^[[3~' delete-char
+autoload -Uz add-zsh-hook
+_wsl_cli_git_prompt() {
+    local branch worktree_status
+    psvar[1]=''
+    psvar[2]=''
+    if branch="$(command timeout 1s git symbolic-ref --quiet --short HEAD 2>/dev/null)" \
+        || branch="$(command timeout 1s git describe --tags --exact-match HEAD 2>/dev/null)" \
+        || branch="$(command timeout 1s git rev-parse --short HEAD 2>/dev/null)"; then
+        psvar[1]="$branch"
+        if worktree_status="$(command timeout 1s git --no-optional-locks status \
+            --porcelain --untracked-files=no --ignore-submodules=dirty 2>/dev/null)"; then
+            [[ -z "$worktree_status" ]] || psvar[2]='✗'
+        else
+            print -u2 -r -- "Cannot read Git working-tree status for the zsh prompt."
+        fi
+    fi
+    return 0
+}
+add-zsh-hook precmd _wsl_cli_git_prompt
+PROMPT='%B%(?.%F{green}.%F{red})➜%b%f  %F{cyan}%c%f%1(V. %B%F{blue}git:(%b%F{red}%1v%B%F{blue})%b%f.)%2(V. %F{yellow}%2v%f.) '
+RPROMPT=''
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=8'
+ZSH_AUTOSUGGEST_STRATEGY=(history)
+if (( ! $+functions[_zsh_autosuggest_start] )); then
+    source "$HOME/.local/share/wsl-bootstrap/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
+fi
+bindkey '^[[C' forward-char
+bindkey '^[OC' forward-char
+if (( ! $+functions[_zsh_highlight] )); then
+    source "$HOME/.local/share/wsl-bootstrap/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+fi
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+_wsl_cli_cd_casefold() {
+    if (( $# != 1 )) || [[ -z "$1" || "$1" == [-+]* || -d "$1" ]]; then
+        builtin cd "$@"
+        return
+    fi
+    local requested="$1" prefix component resolved candidate
+    local -a prefixes=('') components matches targets=()
+    if [[ "$requested" != /* && "$requested" != ./* && "$requested" != ../* ]]; then
+        prefixes+=("${cdpath[@]}")
+        for prefix in "${prefixes[@]}"; do
+            if [[ -d "${prefix:+$prefix/}$requested" ]]; then
+                builtin cd "$@"
+                return
+            fi
+        done
+    fi
+    setopt localoptions extendedglob
+    components=("${(@s:/:)requested}")
+    for prefix in "${prefixes[@]}"; do
+        if [[ "$requested" == /* ]]; then
+            resolved=/
+        else
+            resolved="${prefix:-.}"
+            [[ "$resolved" == /* ]] || resolved="$PWD/$resolved"
+            resolved="${resolved:a}"
+        fi
+        for component in "${components[@]}"; do
+            [[ -n "$component" ]] || continue
+            candidate="${resolved%/}/$component"
+            if [[ -d "$candidate" ]]; then
+                resolved="$candidate"
+                continue
+            fi
+            matches=("${resolved%/}"/(#i)"$component"(ND-/))
+            if (( ${#matches} > 1 )); then
+                print -u2 -r -- "cd: ambiguous case-insensitive directory: $candidate"
+                return 1
+            fi
+            if (( ${#matches} == 0 )); then
+                resolved=''
+                break
+            fi
+            resolved="$matches[1]"
+        done
+        if [[ -n "$resolved" && "${targets[(Ie)$resolved]}" == 0 ]]; then
+            targets+=("$resolved")
+        fi
+    done
+    if (( ${#targets} > 1 )); then
+        print -u2 -r -- "cd: ambiguous case-insensitive path: $requested"
+        return 1
+    elif (( ${#targets} == 1 )); then
+        builtin cd -- "$targets[1]"
+    else
+        builtin cd "$@"
+    fi
+}
+if (( ! $+functions[cd] && ! $+aliases[cd] )); then
+    function cd { _wsl_cli_cd_casefold "$@" }
+fi
+ZSHRC
+    write_managed_block "$zdotdir/.zshrc" "interactive zsh"
+    configure_copilot_aliases "$zdotdir/.zshrc"
+    "$zsh_bin" -n "$startup_directory/.zshenv"
+    "$zsh_bin" -n "$zdotdir/.zprofile"
+    "$zsh_bin" -n "$zdotdir/.zshrc"
+    "$zsh_bin" -n "$zdotdir/.zlogin"
+    echo "Zsh startup files saved and syntax checked."
+}
+
+verify_zsh() {
+    require_commands zsh timeout
+    local mode startup_output zsh_bin
+    zsh_bin="$(type -P zsh)"
+    for mode in -ic -lic; do
+        # Disable job control so startup children stay in timeout's process group.
+        if timeout --kill-after=5s 15s "$zsh_bin" +m "$mode" '
+            (( $+functions[compdef] && $+functions[_main_complete] &&
+               $+functions[_zsh_autosuggest_start] && $+functions[_zsh_highlight] )) \
+                || { print -u2 -- "Missing zsh completion or plugin functions."; exit 1; }
+            (( $+aliases[cc] && $+aliases[ccw] && $+aliases[dd] )) \
+                || { print -u2 -- "Missing Copilot shell shortcuts."; exit 1; }
+            _zsh_autosuggest_start || exit 1
+            [[ "${widgets[forward-char]-}" == user:_zsh_autosuggest_bound_* ]] \
+                || { print -u2 -- "History-suggestion widgets were not initialized."; exit 1; }
+            [[ "$(bindkey "^[[C")" == *forward-char* && "$(bindkey "^[OC")" == *forward-char* ]] \
+                || { print -u2 -- "Right Arrow must use forward-char for movement and suggestion acceptance."; exit 1; }
+            unsetopt SHARE_HISTORY
+            HISTFILE=/dev/null
+            fc -p
+            print -s -- "echo __WSL_BOOTSTRAP_HISTORY_READY__"
+            # The newest event is still in progress and absent from $history.
+            print -s -- "echo __WSL_BOOTSTRAP_NEXT_ENTRY__"
+            suggestion=""
+            _zsh_autosuggest_strategy_history "echo __WSL_BOOTSTRAP_HISTORY" || exit 1
+            [[ "$suggestion" == "echo __WSL_BOOTSTRAP_HISTORY_READY__" ]] \
+                || { print -u2 -- "The history strategy could not produce a test suggestion."; exit 1; }
+            print -r -- "__WSL_BOOTSTRAP_ZSH_READY__"
+        ' </dev/null >"$tmp/zsh-startup.log" 2>&1; then
+            startup_output="$(<"$tmp/zsh-startup.log")"
+        else
+            cat "$tmp/zsh-startup.log" >&2
+            die "Zsh $mode failed completion/widget/history-suggestion checks; inspect existing startup files."
+        fi
+        [[ "${startup_output##*$'\n'}" == "__WSL_BOOTSTRAP_ZSH_READY__" ]] \
+            || die "Zsh $mode exited before readiness checks; an existing startup file may return/exit early."
+        startup_output="${startup_output%__WSL_BOOTSTRAP_ZSH_READY__}"
+        if [[ -n "$startup_output" ]]; then
+            printf '%s\n' "$startup_output"
+        fi
+        printf 'Zsh %s: completion, bound widgets, history suggestions and highlighting are ready.\n' "$mode"
+    done
+}
+
+set_default_zsh() {
+    require_commands zsh
+    local zsh_bin account
+    zsh_bin="$(type -P zsh)"
+    account="$(id -un)"
+    if ! grep -Fxq "$zsh_bin" /etc/shells; then
+        require_step sudo
+        printf '%s\n' "$zsh_bin" | sudo -n tee -a /etc/shells >/dev/null
+    fi
+    if [[ "$(getent passwd "$account" | cut -d: -f7)" != "$zsh_bin" ]]; then
+        require_step sudo
+        sudo -n usermod --shell "$zsh_bin" "$account"
+    fi
+    [[ "$(getent passwd "$account" | cut -d: -f7)" == "$zsh_bin" ]] \
+        || die "The default login shell is still not $zsh_bin; review the account's shell configuration."
+    export SHELL="$zsh_bin"
+    printf 'Default login shell configured for %s: %s\n' "$account" "$zsh_bin"
+}
+
+configure_tmux() {
+    require_commands tmux zsh python3
+    local tmux_config="$HOME/.tmux.conf" zsh_bin
+    tmux -V | grep -Eq '^tmux [0-9]+(\.[0-9]+)+[a-z]?$' \
+        || die "The selected tmux is not a stable release; move the development binary aside and rerun."
+    zsh_bin="$(type -P zsh)"
+    if [[ ! -e "$tmux_config" && -e "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf" ]]; then
+        tmux_config="${XDG_CONFIG_HOME:-$HOME/.config}/tmux/tmux.conf"
+    fi
+    printf 'set -g default-shell "%s"\n' "$zsh_bin" > "$tmp/config-block"
+    write_managed_block "$tmux_config" "default shell"
+    echo "Tmux default shell saved; existing sessions are not restarted."
+}
+
+enable_wsl_systemd() {
+    sudo -n python3 - <<'PY'
+import os
+from pathlib import Path
+import re
+import shutil
+import tempfile
+
+path = Path("/etc/wsl.conf")
+if path.is_symlink():
+    raise SystemExit("Refusing symlinked /etc/wsl.conf.")
+text = path.read_text(encoding="utf-8") if path.exists() else ""
+lines = text.splitlines(keepends=True)
+sections = [(i, m.group(1).lower()) for i, line in enumerate(lines)
+            if (m := re.match(r"^\s*\[([^\]]+)\]\s*(?:[#;].*)?$", line))]
+boots = [i for i, name in sections if name == "boot"]
+if len(boots) > 1:
+    raise SystemExit("Duplicate [boot] sections in /etc/wsl.conf; refusing to guess.")
+if boots:
+    start = boots[0] + 1
+    end = next((i for i, _ in sections if i >= start), len(lines))
+    keys = [i for i in range(start, end) if re.match(r"^\s*systemd\s*=", lines[i], re.I)]
+    if len(keys) > 1:
+        raise SystemExit("Duplicate boot.systemd keys in /etc/wsl.conf.")
+    if keys:
+        value = lines[keys[0]].split("=", 1)[1].split("#", 1)[0].split(";", 1)[0].strip().lower()
+        if value not in ("true", "1"):
+            raise SystemExit("boot.systemd is explicitly disabled; its existing policy was not overridden.")
+        lines[keys[0]] = "systemd=true\n"
+    else:
+        if end and not lines[end - 1].endswith("\n"):
+            lines[end - 1] += "\n"
+        lines.insert(end, "systemd=true\n")
+    updated = "".join(lines)
+else:
+    updated = text.rstrip("\n") + "\n\n[boot]\nsystemd=true\n"
+if updated != text:
+    backup = path.with_name("wsl.conf.wsl-bootstrap.bak")
+    if backup.is_symlink():
+        raise SystemExit("Refusing symlinked wsl.conf backup.")
+    if path.exists() and not backup.exists():
+        shutil.copy2(path, backup)
+    fd, staged = tempfile.mkstemp(prefix=".wsl.conf.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(updated)
+        os.chmod(staged, path.stat().st_mode & 0o777 if path.exists() else 0o644)
+        if path.exists():
+            metadata = path.stat()
+            os.chown(staged, metadata.st_uid, metadata.st_gid)
+        os.replace(staged, path)
+    finally:
+        if os.path.exists(staged):
+            os.unlink(staged)
+PY
+}
+
+docker_as_user() {
+    sudo -n runuser -u "$(id -un)" -- env -i \
+        HOME="$HOME" USER="$(id -un)" PATH="$PATH" \
+        timeout --kill-after=5s 5s "$docker_bin" --host unix:///var/run/docker.sock "$@"
+}
+
+configure_native_docker_mirror() {
+    local result
+    if (( china_mirror_requested == 0 )); then
+        return
+    fi
+    result="$(sudo -n python3 "$run_state/mirror-config.py" docker "$docker_registry_mirror" "$dockerd_bin")" \
+        || die "Docker mirror configuration failed validation; the original configuration was preserved."
+    case "$result" in
+        changed) echo "Configured the DaoCloud Docker Hub mirror." ;;
+        unchanged) echo "Keeping the configured DaoCloud Docker Hub mirror." ;;
+        *) die "Unexpected Docker mirror configuration result: $result" ;;
+    esac
+}
+
+reload_native_docker_mirror() {
+    local pid executable
+    if [[ "$(ps -p 1 -o comm=)" == systemd ]]; then
+        pid="$(systemctl show --property=MainPID --value docker.service)" \
+            || die "Cannot determine the Docker service PID for configuration reload."
+    else
+        pid="$(sudo -n cat /run/docker.pid)" \
+            || die "Cannot read the native Docker PID; reload Docker manually to apply its mirror."
+    fi
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || die "Invalid Docker PID; no reload signal was sent."
+    executable="$(sudo -n readlink -f "/proc/$pid/exe")" \
+        || die "Cannot verify the native Docker process before configuration reload."
+    [[ "${executable% (deleted)}" == "$(readlink -f "$dockerd_bin")" ]] \
+        || die "Docker PID belongs to a different executable; no reload signal was sent."
+    echo "Reloading Docker registry mirrors without restarting running containers..."
+    sudo -n kill -HUP "$pid" || die "Docker configuration reload failed."
+}
+
+native_docker_mirror_is_active() {
+    local mirrors_json
+    mirrors_json="$(docker_as_user info --format '{{json .RegistryConfig.Mirrors}}')" || return
+    python3 -c '
+import json, sys
+mirrors = json.loads(sys.argv[1])
+raise SystemExit(not any(value.rstrip("/") == sys.argv[2].rstrip("/") for value in mirrors))
+' "$mirrors_json" "$docker_registry_mirror"
+}
+
+configure_docker() {
+    local endpoint context server_os package docker_bin dockerd_bin
+    local repository_file fingerprint service_state native_package socket_path server_version containerd_bin
+    docker_restart_required=0
+    local docker_was_running=0
+    if available docker; then
+        docker_bin="$(type -P docker)"
+        docker --version
+        context="$(docker context show)" || die "Cannot determine the selected Docker context."
+        if [[ -n "${DOCKER_HOST:-}" && -z "${DOCKER_CONTEXT:-}" ]]; then
+            endpoint="$DOCKER_HOST"
+        else
+            endpoint="$(docker context inspect "$context" --format '{{.Endpoints.docker.Host}}')" \
+                || die "Cannot inspect the selected Docker context."
+        fi
+        server_os="$(timeout --kill-after=5s 5s docker info --format '{{.OperatingSystem}}' 2>/dev/null)" || server_os=""
+        socket_path="$(readlink -m /var/run/docker.sock)"
+        if [[ "$server_os" == *"Docker Desktop"* || "$endpoint" != unix:///var/run/docker.sock \
+            || "$socket_path" == /mnt/wsl/* || "$context" != default \
+            || -n "${DOCKER_CONTEXT:-}${DOCKER_HOST:-}" ]] \
+            || ! available dockerd; then
+            timeout --kill-after=5s 5s docker info >/dev/null \
+                || die "The selected Desktop/remote/rootless/custom Docker backend is unavailable; it was not replaced."
+            echo "Keeping the selected Docker backend: $context ($endpoint)."
+            if (( china_mirror_requested == 1 )); then
+                echo "This custom/Desktop/remote/rootless backend is preserved; configure its registry mirror in that backend's settings."
+            fi
+            return
+        fi
+        dockerd_bin="$(type -P dockerd)"
+        native_package="$(dpkg-query -S "$(readlink -f "$dockerd_bin")" 2>/dev/null)" \
+            || die "A custom Docker daemon is installed; refusing to change its service configuration."
+        case "$native_package" in
+            docker-ce:*|docker.io:*) ;;
+            *) die "A custom Docker daemon is installed; refusing to change its service configuration." ;;
+        esac
+    else
+        require_step apt-update
+        require_commands python3
+        [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}" ]] \
+            || die "Docker endpoint overrides are set but the Docker CLI is missing; refusing to install a competing Engine."
+        [[ ! -e /var/run/docker.sock && ! -L /var/run/docker.sock ]] \
+            || die "An existing Docker socket has no native CLI; enable its original integration instead."
+        context="$(python3 - "${DOCKER_CONFIG:-$HOME/.docker}/config.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+print(config.get("currentContext") or "default")
+PY
+)"
+        [[ "$context" == default ]] \
+            || die "A non-default Docker context is saved but its CLI is missing; the selected backend was preserved."
+        for package in docker.io docker-compose docker-compose-v2 docker-buildx \
+            podman-docker containerd runc; do
+            if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null)" == installed ]]; then
+                die "Docker installation conflicts with existing $package; no packages were removed."
+            fi
+        done
+        echo "Installing missing native Docker Engine; optional CLI plugins run separately..."
+        ensure_command gpg gnupg
+        [[ -s /etc/ssl/certs/ca-certificates.crt ]] || install_packages ca-certificates
+        download "$docker_package_base/linux/ubuntu/dists/${VERSION_CODENAME}/Release" "$tmp/docker-release"
+        grep -Eq "^Architectures:.*\\b${arch}\\b" "$tmp/docker-release" \
+            || die "Docker does not publish stable packages for ${VERSION_CODENAME}/${arch}."
+        download "$docker_package_base/linux/ubuntu/gpg" "$tmp/docker.asc"
+        # APT trusts every primary key in Signed-By, not only the first one.
+        fingerprint="$(gpg --batch --show-keys --with-colons "$tmp/docker.asc" \
+            | awk -F: '$1 == "pub" { primary=1; next } $1 == "fpr" && primary { print $10; primary=0 }')"
+        [[ "$fingerprint" == 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ]] \
+            || die "Unexpected Docker signing-key fingerprint."
+        repository_file=/etc/apt/sources.list.d/docker.sources
+        cat > "$tmp/docker.sources" <<EOF
+Types: deb
+URIs: $docker_package_base/linux/ubuntu
+Suites: ${VERSION_CODENAME}
+Components: stable
+Architectures: ${arch}
+Signed-By: /etc/apt/keyrings/wsl-bootstrap-docker.asc
+EOF
+        if grep -rsEl '^[^#]*(download\.docker\.com|mirrors\.ustc\.edu\.cn/docker-ce)/linux/ubuntu' \
+            /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null \
+            | grep -qvFx "$repository_file"; then
+            die "An existing Docker apt source needs review; refusing to create conflicting Signed-By entries."
+        fi
+        if [[ -e "$repository_file" || -L "$repository_file" ]]; then
+            if [[ -L "$repository_file" ]] || ! cmp -s "$tmp/docker.sources" "$repository_file"; then
+                die "Existing docker.sources differs from the managed stable source; it was not overwritten."
+            fi
+        fi
+        sudo -n install -d -m 0755 /etc/apt/keyrings
+        [[ ! -L /etc/apt/keyrings/wsl-bootstrap-docker.asc ]] \
+            || die "Refusing to replace a symlinked Docker signing key."
+        if [[ ! -e /etc/apt/keyrings/wsl-bootstrap-docker.asc ]]; then
+            docker_key_created=1
+        elif ! cmp -s "$tmp/docker.asc" /etc/apt/keyrings/wsl-bootstrap-docker.asc; then
+            die "The managed Docker signing key differs; it was not overwritten."
+        fi
+        sudo -n install -m 0644 "$tmp/docker.asc" /etc/apt/keyrings/wsl-bootstrap-docker.asc
+        if [[ ! -e "$repository_file" ]]; then
+            docker_source_created=1
+        fi
+        sudo -n install -m 0644 "$tmp/docker.sources" "$repository_file"
+        invalidate_apt_metadata
+        # Keep verified repositories if installation later leaves partial packages.
+        install_packages --no-install-recommends docker-ce docker-ce-cli containerd.io
+        docker_bin="$(type -P docker)"
+        dockerd_bin="$(type -P dockerd)"
+    fi
+
+    require_step sudo
+    getent group docker >/dev/null || die "The native Docker package did not create its docker group."
+    if ! id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq docker; then
+        echo "Adding the current account to the docker group (root-equivalent access)."
+        sudo -n usermod --append --groups docker "$(id -un)"
+    fi
+    if [[ "$(ps -p 1 -o comm=)" == systemd ]]; then
+        service_state="$(systemctl is-enabled docker.service 2>/dev/null)" || :
+        [[ "$service_state" != masked ]] || die "Docker is deliberately masked; its policy was not overridden."
+        if (( china_mirror_requested == 1 )); then
+            if docker_as_user info >/dev/null 2>&1; then
+                docker_was_running=1
+            fi
+            configure_native_docker_mirror
+        fi
+        if [[ "$service_state" != enabled ]]; then
+            sudo -n systemctl enable docker.service
+        fi
+        if ! systemctl is-active --quiet docker.service; then
+            sudo -n systemctl start --no-block docker.service
+        fi
+    else
+        (( is_wsl == 1 )) \
+            || die "Native Docker setup requires systemd on standard Ubuntu. No WSL configuration or competing daemon was created."
+        if (( china_mirror_requested == 1 )); then
+            if docker_as_user info >/dev/null 2>&1; then
+                docker_was_running=1
+            fi
+            configure_native_docker_mirror
+        fi
+        install_packages systemd systemd-sysv
+        enable_wsl_systemd
+        if ! systemctl --root=/ is-enabled --quiet docker.service; then
+            sudo -n systemctl --root=/ enable docker.service
+        fi
+        docker_restart_required=1
+        touch "$run_state/docker-restart-required"
+        echo "WSL systemd is configured for the next boot; restart this distro to activate systemd."
+        if ! docker_as_user info >/dev/null 2>&1; then
+            if [[ -x /etc/init.d/docker ]]; then
+                timeout --kill-after=5s 30s sudo -n service docker start \
+                    || die "Docker could not start in this boot. WSL systemd is configured; restart this distro and rerun."
+            else
+                for service_state in /etc/systemd/system/docker.service.d \
+                    /etc/systemd/system/containerd.service.d \
+                    /run/systemd/system/docker.service.d /run/systemd/system/containerd.service.d \
+                    /etc/systemd/system/docker.service /etc/systemd/system/containerd.service; do
+                    [[ ! -e "$service_state" ]] \
+                        || die "Custom Docker/containerd service settings require systemd. Restart this distro; settings were preserved."
+                done
+                if [[ -s /etc/docker/daemon.json ]]; then
+                    (( china_mirror_requested == 1 )) && sudo -n python3 -c '
+import json
+from pathlib import Path
+config = json.loads(Path("/etc/docker/daemon.json").read_text())
+raise SystemExit(not isinstance(config, dict) or bool(set(config) - {"registry-mirrors"}))
+' || die "Custom Docker settings require its normal service. Restart this distro to activate systemd."
+                fi
+                [[ ! -s /etc/default/docker ]] \
+                    || die "Custom Docker settings require its normal service. Restart this distro to activate the configured systemd."
+                containerd_bin="$(type -P containerd)"
+                dpkg-query -S "$(readlink -f "$containerd_bin")" 2>/dev/null \
+                    | grep -Eq '^(containerd.io|containerd):' \
+                    || die "A custom containerd cannot be started automatically; restart this distro to use its normal service."
+                # This fallback lasts only for this boot; systemd owns subsequent startup.
+                sudo -n flock -w 15 /run/wsl-bootstrap-docker.lock /bin/sh -s -- "$dockerd_bin" "$containerd_bin" <<'ROOT' \
+                    || die "Docker could not start in this boot. WSL systemd is configured; restart this distro and rerun."
+set -eu
+if [ -s /run/docker.pid ] && kill -0 "$(cat /run/docker.pid)" 2>/dev/null; then
+    exit 0
+fi
+if [ -e /var/run/docker.sock ]; then
+    echo "An unresponsive Docker socket already exists; refusing a competing daemon." >&2
+    exit 1
+fi
+if pgrep -x dockerd >/dev/null; then
+    echo "A Docker daemon already exists without a usable socket; refusing a competing daemon." >&2
+    exit 1
+fi
+umask 077
+exec >>/var/log/wsl-bootstrap-docker.log 2>&1
+if [ ! -S /run/containerd/containerd.sock ]; then
+    if pgrep -x containerd >/dev/null; then
+        echo "An existing containerd has no usable socket; refusing a competing process." >&2
+        exit 1
+    fi
+    start-stop-daemon --start --background --exec "$2" -- --address /run/containerd/containerd.sock
+    attempt=0
+    while [ ! -S /run/containerd/containerd.sock ]; do
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 30 ]; then
+            echo "containerd did not create its socket." >&2
+            exit 1
+        fi
+        sleep 1
+    done
+fi
+start-stop-daemon --start --background --pidfile /run/docker.pid --exec "$1" -- \
+    --host unix:///var/run/docker.sock --pidfile /run/docker.pid \
+    --containerd /run/containerd/containerd.sock
+ROOT
+            fi
+        fi
+    fi
+    local ready=0 attempt
+    for ((attempt=0; attempt<6; attempt++)); do
+        if docker_as_user info >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        sleep 2
+    done
+    if (( ready == 0 )); then
+        docker_as_user info || true
+        if (( docker_restart_required == 1 )); then
+            die "Docker is not ready in this boot. WSL systemd is configured; restart this distro, then inspect journalctl -u docker."
+        fi
+        die "Docker Engine did not become ready. Inspect journalctl -u docker or /var/log/wsl-bootstrap-docker.log."
+    fi
+    server_version="$(docker_as_user info --format '{{.ServerVersion}}')"
+    [[ -n "$server_version" ]] || die "Docker returned no server version."
+    echo "Docker Engine $server_version is ready without sudo in a fresh user session."
+    if (( china_mirror_requested == 1 )); then
+        if (( docker_was_running == 1 )) && ! native_docker_mirror_is_active; then
+            reload_native_docker_mirror
+        fi
+        local mirror_ready=0
+        for ((attempt=0; attempt<3; attempt++)); do
+            if native_docker_mirror_is_active; then
+                mirror_ready=1
+                break
+            fi
+            sleep 1
+        done
+        (( mirror_ready == 1 )) \
+            || die "Docker did not activate the configured registry mirror; inspect the daemon configuration/reload logs."
+        echo "DaoCloud Docker Hub mirror is active (public service whitelist/rate limits may apply)."
+    fi
+    echo "Existing parent shells/tmux servers keep their old groups; a fresh login applies docker group access."
+}
+
+install_docker_plugin() {
+    local plugin="$1" owner package
+    require_commands docker
+    if timeout --kill-after=3s 10s docker "$plugin" version; then
+        return
+    fi
+    owner="$(dpkg-query -S "$(readlink -f "$(type -P docker)")" 2>/dev/null)" \
+        || block_step "The custom Docker CLI has no usable $plugin plugin; use its original installer."
+    case "$owner:$plugin" in
+        docker-ce-cli:*:compose) package=docker-compose-plugin ;;
+        docker-ce-cli:*:buildx) package=docker-buildx-plugin ;;
+        docker.io:*:compose) package=docker-compose-v2 ;;
+        docker.io:*:buildx) package=docker-buildx ;;
+        *) block_step "Unrecognized Docker CLI package; its $plugin plugin was not replaced." ;;
+    esac
+    install_packages "$package"
+    timeout --kill-after=3s 10s docker "$plugin" version \
+        || die "The installed Docker $plugin plugin is not usable."
+}
+
+require_supported_node() {
+    node -e 'if (Number(process.versions.node.split(".")[0]) < 22) { console.error("Existing Node.js is below 22; upgrade it explicitly before installing Copilot. No automatic upgrade was performed."); process.exit(1); }'
+}
+
+require_agent_browser_node() {
+    node -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("Existing Node.js is below 24; upgrade it explicitly before installing agent-browser. No automatic upgrade was performed."); process.exit(1); }'
+}
+
+configure_passwordless_sudo() {
+    available sudo || die "sudo is required. Ask an administrator to install it first."
+    if sudo -k -n /usr/bin/true >/dev/null 2>&1; then
+        echo "Passwordless sudo is already available; leaving the existing sudo policy unchanged."
+        return
+    fi
+    echo "Enabling passwordless sudo for the current user (UID $EUID)."
+    echo "This grants unrestricted root commands without a password; use only in a trusted WSL development environment."
+    sudo -v
+    printf '#%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$EUID" > "$tmp/sudoers"
+    # Keep rollback inside the authorized root process if validation fails.
+    sudo -n /bin/sh -s -- "$tmp/sudoers" "/etc/sudoers.d/99-wsl-bootstrap-$EUID" <<'ROOT'
+set -eu
+visudo -c
+visudo -cf "$1"
+if [ -L "$2" ]; then
+    echo "Refusing to replace a sudoers symlink: $2" >&2
+    exit 1
+fi
+if [ -e "$2" ]; then
+    if ! cmp -s "$1" "$2"; then
+        echo "Existing sudoers file differs; review it manually: $2" >&2
+        exit 1
+    fi
+    chown root:root "$2"
+    chmod 0440 "$2"
+else
+    install -o root -g root -m 0440 "$1" "$2"
+    if ! visudo -c; then
+        rm -f -- "$2"
+        echo "Sudoers validation failed; the new rule was removed." >&2
+        exit 1
+    fi
+fi
+ROOT
+    # Ignore cached authorization when verifying that the rule actually works.
+    sudo -k -n /usr/bin/true || die "Passwordless sudo verification failed; review the effective sudo policy."
+    echo "Passwordless sudo is configured."
+}
+
+azure_login_arguments=()
+azure_token_arguments=()
+if [[ -n "$azure_tenant" ]]; then
+    azure_login_arguments=(--tenant "$azure_tenant" --skip-subscription-discovery)
+    azure_token_arguments=(--tenant "$azure_tenant")
+fi
+login_command_status=0
+run_login_command() {
+    # Called unconditionally so failures inside login helpers retain errexit.
+    ( trap - EXIT; set -Eeuo pipefail; "$@" ) <&0 &
+    local child=$!
+    login_command_status=0
+    wait "$child" || login_command_status=$?
+}
+
+guide_login() {
+    local label="$1" answer
+    shift
+    printf '\n%s login command:' "$label"
+    printf ' %s' "$@"
+    printf '\n'
+    while true; do
+        if ! read -r -t 120 -p "Press Enter to log in, or type s to skip (120-second limit): " answer </dev/tty; then
+            echo "No login confirmation received; skipping. Run the displayed command manually." >&2
+            login_command_status=2
+            return 0
+        fi
+        case "$answer" in
+            s|S)
+                echo "Skipped $label login; existing account settings were not changed."
+                login_command_status=2
+                return 0
+                ;;
+            ""|y|Y)
+                run_login_command "$@" </dev/tty
+                if (( login_command_status == 0 )); then
+                    echo "$label login command completed."
+                    return 0
+                else
+                    echo "$label login failed. Rerun the displayed command to retry." >&2
+                    return 0
+                fi
+                ;;
+            *) echo "Enter y to log in or s to skip." ;;
+        esac
+    done
+}
+
+github_is_logged_in() {
+    local diagnostic
+    local token_status=0
+    timeout --kill-after=3s 15s gh auth token --hostname github.com >/dev/null 2>&1 || token_status=$?
+    if (( token_status == 124 || token_status == 137 )); then
+        echo "GitHub credential-store lookup timed out; saved credentials were not replaced." >&2
+        return 2
+    fi
+    (( token_status == 0 )) || return 1
+    if diagnostic="$(timeout --kill-after=3s 30s gh api --hostname github.com user --silent 2>&1)"; then
+        return 0
+    fi
+    if [[ "$diagnostic" == *"(HTTP 401)"* ]]; then
+        if [[ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+            echo "GitHub rejected GH_TOKEN/GITHUB_TOKEN; replace or unset the environment token, then rerun setup." >&2
+            return 2
+        fi
+        echo "Saved GitHub credentials are invalid or expired; interactive login is required." >&2
+        return 1
+    fi
+    printf '%s\n' "$diagnostic" >&2
+    echo "Cannot validate GitHub credentials; check network/API access and rerun. The active account was not replaced." >&2
+    return 2
+}
+
+configure_git_identity() {
+    local identity current_name current_email status
+    local -a fields=()
+    if current_name="$(git config --get user.name)"; then
+        :
+    else
+        status=$?
+        (( status == 1 )) || die "Cannot read the existing Git user.name; it was not changed."
+    fi
+    if current_email="$(git config --get user.email)"; then
+        :
+    else
+        status=$?
+        (( status == 1 )) || die "Cannot read the existing Git user.email; it was not changed."
+    fi
+    if [[ -n "$current_name" && -n "$current_email" ]]; then
+        echo "Keeping the existing Git identity."
+        return
+    fi
+    identity="$(timeout --kill-after=3s 30s gh api --hostname github.com user --jq '
+        [(if .name == null or .name == "" then .login else .name end),
+         (if .email == null or .email == "" then
+              "\(.id)+\(.login)@users.noreply.github.com"
+          else .email end)] | .[]
+    ')" || die "Cannot read the active GitHub identity; Git identity was not changed."
+    mapfile -t fields <<< "$identity"
+    (( ${#fields[@]} == 2 )) && [[ -n "${fields[0]}" && -n "${fields[1]}" ]] \
+        || die "GitHub returned an incomplete Git identity; Git identity was not changed."
+    if [[ -z "$current_name" ]]; then
+        git config --global user.name "${fields[0]}" || die "Cannot configure global Git user.name."
+    fi
+    if [[ -z "$current_email" ]]; then
+        git config --global user.email "${fields[1]}" || die "Cannot configure global Git user.email."
+    fi
+    echo "Filled missing Git identity fields; existing values were preserved."
+}
+
+azure_is_logged_in() {
+    local diagnostic
+    if diagnostic="$(timeout --kill-after=3s 30s az account get-access-token \
+        "${azure_token_arguments[@]}" \
+        --resource https://management.azure.com/ \
+        --only-show-errors 2>&1)"; then
+        return 0
+    fi
+    case "$diagnostic" in
+        *"Please run 'az login'"*|*"Please reauthenticate"*|\
+        *AADSTS50058:*|*AADSTS50076:*|*AADSTS50079:*|*AADSTS50173:*|\
+        *AADSTS70043:*|*AADSTS700082:*|*AADSTS700084:*)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$diagnostic" >&2
+    echo "Cannot validate Azure credentials; check network/tenant access and retry. Saved accounts were not replaced." >&2
+    return 2
+}
+
+copilot_is_logged_in() {
+    local github_status="$1" token diagnostic
+    if [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]]; then
+        token="$COPILOT_GITHUB_TOKEN"
+    else
+        (( github_status == 0 )) || return "$github_status"
+        token="$(timeout --kill-after=3s 15s gh auth token --hostname github.com)" \
+            || { echo "Cannot read GitHub credentials for Copilot; existing accounts were preserved." >&2; return 2; }
+    fi
+    if [[ "$token" == ghp_* ]]; then
+        echo "Copilot does not support classic GitHub PATs; use a supported Copilot/gh OAuth token or fine-grained PAT." >&2
+        if [[ -n "${COPILOT_GITHUB_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
+            echo "Replace or unset the environment token before retrying Copilot login." >&2
+            return 2
+        fi
+        return 1
+    fi
+    if [[ -n "${COPILOT_GITHUB_TOKEN:-}" ]]; then
+        if ! diagnostic="$(GH_TOKEN="$token" timeout --kill-after=3s 30s gh api --hostname github.com user --silent 2>&1)"; then
+            printf '%s\n' "$diagnostic" >&2
+            echo "Cannot validate the Copilot environment token; check network access or replace/unset the token before retrying." >&2
+            return 2
+        fi
+    fi
+    return 0
+}
+
+prepare_copilot_keyring() {
+    if ! available secret-tool; then
+        install_packages libsecret-tools
+        available secret-tool || die "libsecret-tools did not provide secret-tool on PATH."
+    fi
+    ensure_command gnome-keyring-daemon gnome-keyring
+    if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        ensure_command dbus-run-session dbus-daemon
+    else
+        timeout --foreground --kill-after=3s 15s gnome-keyring-daemon --start --components=secrets >/dev/null \
+            || die "Could not start the GNOME keyring secrets service; refusing plaintext Copilot token storage."
+    fi
+}
+
+copilot_keyring_probe() {
+    local probe_value stored_value
+    probe_value="copilot-bootstrap-${EUID}-${RANDOM}-${RANDOM}"
+    if ! printf '%s' "$probe_value" \
+        | timeout --foreground --kill-after=3s 15s secret-tool store --label='Copilot CLI bootstrap probe' \
+            copilot-bootstrap-probe "$probe_value" >/dev/null 2>&1; then
+        die "The Linux system keyring is unavailable; refusing plaintext Copilot token storage."
+    fi
+    stored_value="$(timeout --foreground --kill-after=3s 15s secret-tool lookup copilot-bootstrap-probe "$probe_value" 2>/dev/null)" || {
+        timeout --foreground --kill-after=3s 15s secret-tool clear copilot-bootstrap-probe "$probe_value" >/dev/null 2>&1 \
+            || echo "Could not remove the temporary keyring probe; clear it manually." >&2
+        die "The Linux system keyring could not read back a stored secret; refusing plaintext Copilot token storage."
+    }
+    timeout --foreground --kill-after=3s 15s secret-tool clear copilot-bootstrap-probe "$probe_value" >/dev/null 2>&1 || {
+        die "The Linux system keyring could not remove its temporary probe; refusing Copilot login."
+    }
+    [[ "$stored_value" == "$probe_value" ]] \
+        || die "The Linux system keyring returned an unexpected probe value; refusing plaintext Copilot token storage."
+}
+
+copilot_login_secure() {
+    prepare_copilot_keyring
+    if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        copilot_keyring_probe
+        timeout --foreground --kill-after=5s 300s copilot login --device-code
+    else
+        export -f die copilot_keyring_probe
+        dbus-run-session -- bash -c '
+            set -Eeuo pipefail
+            timeout --foreground --kill-after=3s 15s gnome-keyring-daemon --start --components=secrets >/dev/null
+            copilot_keyring_probe
+            exec timeout --foreground --kill-after=5s 300s copilot login --device-code
+        ' </dev/tty
+    fi
+}
+
+authorize_sudo() {
+    require_commands sudo
+    if ! sudo -n /usr/bin/true >/dev/null 2>&1; then
+        sudo -v || die "Sudo authorization failed."
+    fi
+    sudo -n /usr/bin/true || die "Sudo authorization could not be verified."
+}
+
+configure_sudo_policy() {
+    if (( is_wsl == 1 )); then
+        configure_passwordless_sudo
+    else
+        echo "Preserving the existing sudo policy."
+    fi
+}
+
+install_curl() {
+    ensure_command curl curl
+    [[ -s /etc/ssl/certs/ca-certificates.crt ]] || install_packages ca-certificates
+}
+
+install_system_utilities() {
+    if ! available ps || ! available pgrep; then
+        install_packages procps
+    fi
+    if ! available setsid || ! available flock || ! available runuser; then
+        install_packages util-linux
+    fi
+    require_commands ps pgrep setsid flock runuser timeout tee
+}
+
+install_python3() {
+    ensure_command python3 python3
+    python3 -c 'import sys; assert sys.version_info.major == 3, "Python 3 is required"'
+}
+
+install_python_alias() {
+    ensure_command python python-is-python3
+    python -c 'import sys; assert sys.version_info.major == 3, "Existing python is not Python 3; repair its mapping explicitly"'
+}
+
+install_pip() {
+    require_commands python3
+    if ! python3 -m pip --version >/dev/null 2>&1 || ! available pip; then
+        install_packages python3-pip
+    fi
+    python3 -m pip --version
+    pip --version
+}
+
+install_venv() {
+    require_commands python3
+    if ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
+        install_packages python3-venv
+    fi
+    python3 -c 'import venv, ensurepip'
+}
+
+retire_missing_github_cli_source() {
+    local source=/etc/apt/sources.list.d/github-cli.list
+    local saved="$source.wsl-bootstrap.disabled" expected
+    available gh && return
+    [[ -f "$source" && ! -L "$source" ]] || return 0
+    expected="deb [arch=$arch signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main"
+    if [[ "$(<"$source")" != "$expected" ]]; then
+        echo "Keeping the custom GitHub CLI apt source; it does not match the legacy bootstrap file."
+        return
+    fi
+    require_step sudo
+    [[ ! -e "$saved" && ! -L "$saved" ]] \
+        || block_step "The legacy GitHub CLI apt backup already exists; inspect $source and $saved."
+    sudo -n mv -- "$source" "$saved"
+    echo "Disabled the exact legacy GitHub CLI apt source; missing gh will use a verified user-local binary."
+}
+
+download_verified_archive() {
+    local url="$1" expected="$2" destination="$3" mirror="${4:-https://gh-proxy.org/$1}" limit="${5:-60}"
+    local source actual status
+    local -a sources=("$url" "$mirror")
+    if (( china_mirror_requested == 1 )); then
+        sources=("$mirror" "$url")
+    fi
+    for source in "${sources[@]}"; do
+        echo "Downloading verified archive: $source (${limit}-second limit)"
+        status=0
+        curl --fail --show-error --location --connect-timeout 10 --max-time "$limit" \
+            --speed-limit 1024 --speed-time 15 "$source" -o "$destination" || status=$?
+        if (( status == 130 || status == 143 )); then
+            exit "$status"
+        fi
+        if (( status != 0 )); then
+            printf 'Archive download failed (exit %s): %s\n' "$status" "$source" >&2
+            continue
+        fi
+        actual="$(sha256sum "$destination")"
+        if [[ "${actual%% *}" == "$expected" ]]; then
+            return
+        fi
+        printf 'Archive checksum mismatch: %s; refusing to extract it.\n' "$source" >&2
+    done
+    die "Both archive sources failed: $url and $mirror. Check HTTPS/proxy access; no unverified binary was installed."
+}
+
+install_github_cli() {
+    if check_existing gh --version; then
+        return
+    fi
+    require_commands curl tar sha256sum
+    local version=2.103.3 checksum installation link="$HOME/.local/bin/gh" output
+    case "$arch" in
+        amd64) checksum=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d ;;
+        arm64) checksum=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63 ;;
+        *) die "Unsupported GitHub CLI architecture: $arch" ;;
+    esac
+    installation="$HOME/.local/share/wsl-bootstrap/gh-$version-linux-$arch"
+    if [[ -e "$link" || -L "$link" ]]; then
+        [[ -L "$link" && "$(readlink -m "$link")" == "$installation/gh" ]] \
+            || die "Refusing to replace an existing user-local gh; inspect $link."
+    fi
+    if [[ -e "$installation" || -L "$installation" ]]; then
+        [[ -d "$installation" && ! -L "$installation" ]] \
+            || die "Unexpected managed GitHub CLI installation: $installation"
+    else
+        download_verified_archive \
+            "https://github.com/cli/cli/releases/download/v$version/gh_${version}_linux_${arch}.tar.gz" \
+            "$checksum" "$tmp/gh.tar.gz"
+        mkdir -p "${installation%/*}"
+        gh_stage="$(mktemp -d "${installation%/*}/.gh-stage.XXXXXXXX")"
+        tar --extract --gzip --no-same-owner --strip-components=2 \
+            --file "$tmp/gh.tar.gz" --directory "$gh_stage" "gh_${version}_linux_${arch}/bin/gh"
+        output="$(timeout --kill-after=3s 10s "$gh_stage/gh" --version)" \
+            || die "The downloaded GitHub CLI binary is not usable on this system."
+        [[ "$output" == "gh version $version "* ]] || die "Unexpected downloaded GitHub CLI version."
+        mv -T -- "$gh_stage" "$installation"
+        gh_stage=""
+    fi
+    output="$(timeout --kill-after=3s 10s "$installation/gh" --version)" \
+        || die "The managed GitHub CLI installation is incomplete; inspect $installation."
+    [[ "$output" == "gh version $version "* ]] || die "Unexpected managed GitHub CLI version."
+    mkdir -p "$HOME/.local/bin"
+    if [[ ! -L "$link" ]]; then
+        ln -s "$installation/gh" "$link"
+    fi
+    hash -r
+    echo "Installed verified user-local GitHub CLI $version without apt or login changes."
+}
+
+write_gh_aw_retry() {
+    local staged
+    [[ ! -e "$report_directory/gh-aw-retry.sh" && ! -L "$report_directory/gh-aw-retry.sh" ]] \
+        || { echo "Refusing to overwrite an existing gh-aw retry script." >&2; return 1; }
+    staged="$(mktemp "$report_directory/.gh-aw-retry.XXXXXXXX")" || return
+    if ! {
+        printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
+        printf 'arch=%q\nchina_mirror_requested=%q\n' "$arch" "$china_mirror_requested"
+        declare -f die _wsl_cli_windows_path _wsl_cli_configure_path available \
+            require_commands download_verified_archive install_gh_aw
+        cat <<'RETRY'
+block_step() { die "Blocked: $*"; }
+_wsl_cli_configure_path
+mkdir -p "$HOME/.local/state/wsl-bootstrap"
+exec 9>"$HOME/.local/state/wsl-bootstrap/setup.lock"
+flock -n 9 || die "Another setup-wsl run or gh-aw retry is active; finish it before retrying."
+extension_stage=""
+cleanup_gh_aw_retry() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$extension_stage" && -d "$extension_stage" ]]; then
+        rm -f -- "$extension_stage/gh-aw" "$extension_stage/manifest.yml" || status=1
+        rmdir -- "$extension_stage" || status=1
+    fi
+    exit "$status"
+}
+trap cleanup_gh_aw_retry EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+install_gh_aw
+RETRY
+    } >"$staged"; then
+        rm -f -- "$staged"
+        return 1
+    fi
+    if ! bash -n "$staged" || ! mv -T -- "$staged" "$report_directory/gh-aw-retry.sh"; then
+        rm -f -- "$staged"
+        return 1
+    fi
+}
+
+install_gh_aw() {
+    require_commands gh
+    local directory="${XDG_DATA_HOME:-$HOME/.local/share}/gh/extensions/gh-aw"
+    local version=1.2.1 checksum
+    if [[ -e "$directory" || -L "$directory" ]]; then
+        if [[ -d "$directory" && ! -L "$directory" && ! -x "$directory/gh-aw" ]] \
+            && rmdir -- "$directory" 2>/dev/null; then
+            echo "Removed an empty leftover gh-aw directory; retrying the verified binary installation."
+        else
+            [[ -d "$directory" && -x "$directory/gh-aw" ]] \
+                || die "Existing gh-aw is incomplete; its directory is nonempty, symlinked, or could not be removed safely. Keeping it unchanged. Inspect $directory before rerunning."
+            available "$directory/gh-aw" || die "Existing gh-aw is not a native executable: $directory/gh-aw"
+            echo "Keeping existing gh-aw: $directory"
+            return
+        fi
+    fi
+    require_commands curl sha256sum
+    case "$arch" in
+        amd64) checksum=84a8c2f8de3f5d3af681e4b3551b8ba47e18a2a2e660464142c12a63cf17bb66 ;;
+        arm64) checksum=6af2d263c3aa9e9080797d7f8e9267ca42bceeca4ebc703949d05b61946bb240 ;;
+        *) die "Unsupported gh-aw architecture: $arch" ;;
+    esac
+    echo "Installing missing gh-aw v$version (prerelease) from a verified Release binary; no clone, build, GitHub API or login is required."
+    echo "Download mirror mode: $china_mirror_requested (1 = gh-proxy.org first, 0 = GitHub first)."
+    mkdir -p "${directory%/*}"
+    extension_stage="$(mktemp -d "${directory%/*}/.gh-aw-stage.XXXXXXXX")"
+    download_verified_archive \
+        "https://github.com/github/gh-aw/releases/download/v$version/linux-$arch" \
+        "$checksum" "$extension_stage/gh-aw"
+    chmod 0755 "$extension_stage/gh-aw"
+    echo "Checking the downloaded gh-aw binary..."
+    timeout --foreground --kill-after=3s 10s "$extension_stage/gh-aw" --version </dev/null \
+        || die "The verified gh-aw binary is not usable on this system."
+    # Use gh's binary-extension layout, avoiding login requirements and install scripts.
+    cat > "$extension_stage/manifest.yml" <<EOF
+owner: github
+name: gh-aw
+host: github.com
+tag: v$version
+ispinned: true
+EOF
+    [[ ! -e "$directory" && ! -L "$directory" ]] \
+        || die "gh-aw appeared during installation; keeping it unchanged. Rerun setup."
+    mv -T -- "$extension_stage" "$directory"
+    extension_stage=""
+    echo "Checking GitHub CLI extension dispatch: gh aw --version"
+    GH_NO_EXTENSION_UPDATE_NOTIFIER=1 timeout --foreground --kill-after=3s 10s gh aw --version </dev/null \
+        || die "gh-aw was installed but GitHub CLI could not run it; inspect $directory."
+    echo "Installed verified gh-aw v$version without login changes."
+}
+
+install_azure_cli() {
+    if check_existing az version --output json; then
+        return
+    fi
+    require_step apt-update
+    ensure_command gpg gnupg
+    sudo -n install -d -m 0755 /etc/apt/keyrings
+    echo "Installing missing Azure CLI..."
+    download https://packages.microsoft.com/keys/microsoft.asc "$tmp/microsoft.asc"
+    gpg --batch --yes --dearmor -o "$tmp/microsoft.gpg" "$tmp/microsoft.asc"
+    publish_apt_file "$tmp/microsoft.gpg" /etc/apt/keyrings/microsoft.gpg
+    cat > "$tmp/azure-cli.sources" <<EOF
+Types: deb
+URIs: https://packages.microsoft.com/repos/azure-cli/
+Suites: ${VERSION_CODENAME}
+Components: main
+Architectures: ${arch}
+Signed-by: /etc/apt/keyrings/microsoft.gpg
+EOF
+    publish_apt_file "$tmp/azure-cli.sources" /etc/apt/sources.list.d/azure-cli.sources
+    invalidate_apt_metadata
+    install_packages azure-cli
+    available az || die "The Azure CLI package did not provide a native az executable."
+    az version --output json
+}
+
+install_node() {
+    if check_existing node --version; then
+        return
+    fi
+    require_commands python3
+    if (( china_mirror_requested == 1 )); then
+        echo "Installing missing Node.js from the npmmirror LTS binary mirror..."
+        install_node_from_mirror
+    else
+        require_step apt-update
+        ensure_command gpg gnupg
+        echo "Installing missing Node.js from the latest LTS release line..."
+        download https://nodejs.org/dist/index.json "$tmp/node-index.json"
+        node_major="$(python3 - "$tmp/node-index.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    releases = json.load(stream)
+versions = [
+    tuple(int(part) for part in release["version"].removeprefix("v").split("."))
+    for release in releases if release.get("lts")
+]
+if not versions:
+    raise SystemExit("No LTS release found in the official Node.js index.")
+print(max(versions)[0])
+PY
+)"
+        [[ "$node_major" =~ ^[0-9]+$ ]] || die "Invalid Node.js LTS version."
+        download https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "$tmp/nodesource.asc"
+        gpg --batch --yes --dearmor -o "$tmp/nodesource.gpg" "$tmp/nodesource.asc"
+        publish_apt_file "$tmp/nodesource.gpg" /usr/share/keyrings/nodesource.gpg
+        cat > "$tmp/nodesource.sources" <<EOF
+Types: deb
+URIs: https://deb.nodesource.com/node_${node_major}.x
+Suites: nodistro
+Components: main
+Architectures: ${arch}
+Signed-By: /usr/share/keyrings/nodesource.gpg
+EOF
+        publish_apt_file "$tmp/nodesource.sources" /etc/apt/sources.list.d/nodesource.sources
+        cat > "$tmp/node-preferences" <<'EOF'
+Package: nodejs
+Pin: origin deb.nodesource.com
+Pin-Priority: 600
+EOF
+        publish_apt_file "$tmp/node-preferences" /etc/apt/preferences.d/wsl-bootstrap-node
+        invalidate_apt_metadata
+        install_packages nodejs
+    fi
+    available node || die "Node installation did not provide a native node executable."
+    node --version
+}
+
+install_npm() {
+    require_commands node
+    node --version >/dev/null
+    ensure_command npm npm
+}
+
+check_copilot_version() {
+    local executable="$1" status=0
+    echo "Checking Copilot executable: $executable (15-second limit)"
+    # Avoid terminal job-control stops and pipes held open by escaped descendants.
+    timeout --foreground --kill-after=5s 15s "$executable" --version \
+        </dev/null >"$tmp/copilot-version.log" 2>&1 || status=$?
+    copilot_diagnostic="$(<"$tmp/copilot-version.log")"
+    rm -f -- "$tmp/copilot-version.log"
+    if (( status == 124 || status == 137 )); then
+        printf 'Copilot version check timed out (exit %s): %s\n' "$status" "$executable" >&2
+    fi
+    return "$status"
+}
+
+install_workiq() {
+    local executable="" resolved native node_arch version=1.0.1
+    if available workiq; then
+        executable="$(type -P workiq)"
+    else
+        [[ ! -e "$HOME/.local/bin/workiq" && ! -L "$HOME/.local/bin/workiq" ]] \
+            || die "An unusable user-local WorkIQ entry already exists; inspect $HOME/.local/bin/workiq before rerunning."
+        require_commands node npm
+        if (( china_mirror_requested == 1 )); then
+            require_step npm-mirror
+        fi
+        require_supported_node
+        ensure_user_npm_prefix
+        echo "Installing missing WorkIQ $version globally..."
+        # All platform binaries are bundled; no lifecycle scripts or extra downloads are needed.
+        retry "Installing WorkIQ $version" timeout --kill-after=5s 180s npm install \
+            --global --engine-strict --ignore-scripts "@microsoft/workiq@$version"
+        executable="$HOME/.local/bin/workiq"
+    fi
+    resolved="$(readlink -f -- "$executable")" || die "Cannot resolve WorkIQ executable: $executable"
+    case "$resolved" in
+        */node_modules/@microsoft/workiq/bin/workiq.js)
+            require_commands node
+            node_arch="$(node -p 'process.arch')"
+            case "$node_arch" in
+                x64|arm64) ;;
+                *) die "Unsupported Node architecture for WorkIQ: $node_arch" ;;
+            esac
+            native="${resolved%/workiq.js}/linux-$node_arch/workiq"
+            [[ -f "$native" && ! -L "$native" ]] \
+                || die "The installed WorkIQ package has no native Linux binary: $native"
+            [[ "$executable" == "$HOME/.local/bin/workiq" && -L "$executable" ]] \
+                || die "WorkIQ's npm launcher selects Windows executables on WSL. Keep the existing package and point $HOME/.local/bin/workiq to $native manually; ensure it precedes $executable on PATH."
+            chmod u+x -- "$native"
+            # The upstream npm launcher selects Windows .exe files on WSL.
+            ln -sfn -- "$native" "$executable"
+            echo "Selected the bundled native Linux WorkIQ binary; package and account data are unchanged."
+            ;;
+    esac
+    available "$executable" || die "WorkIQ is not a native Linux executable: $executable"
+    timeout --foreground --kill-after=3s 15s "$executable" --version </dev/null \
+        || die "Existing WorkIQ failed its version check; keeping the installation unchanged."
+    echo "Keeping installed WorkIQ: $executable"
+}
+
+install_workiq_runtime() {
+    install_packages libwebkit2gtk-4.1-0 libsecret-1-0
+}
+
+ensure_workiq_eula() {
+    local status=0
+    ( umask 077; : > "$tmp/workiq-config.log" )
+    LC_ALL=C LANG=C timeout --foreground --kill-after=3s 15s workiq config show \
+        </dev/null >"$tmp/workiq-config.log" 2>&1 || status=$?
+    if (( status != 0 )); then
+        rm -f -- "$tmp/workiq-config.log"
+        die "Cannot check WorkIQ EULA configuration (exit $status); existing settings were not changed."
+    fi
+    if grep -qx 'I-accept-EULA=true' "$tmp/workiq-config.log"; then
+        rm -f -- "$tmp/workiq-config.log"
+        echo "WorkIQ EULA is already accepted; skipping acceptance."
+        return
+    fi
+    rm -f -- "$tmp/workiq-config.log"
+    echo "Accepting the WorkIQ EULA: workiq accept-eula"
+    LC_ALL=C LANG=C timeout --foreground --kill-after=3s 15s workiq accept-eula </dev/null \
+        || die "WorkIQ EULA acceptance failed; login was not started."
+    LC_ALL=C LANG=C timeout --foreground --kill-after=3s 15s workiq config show \
+        </dev/null >"$tmp/workiq-config.log" 2>&1 || status=$?
+    if (( status != 0 )) || ! grep -qx 'I-accept-EULA=true' "$tmp/workiq-config.log"; then
+        rm -f -- "$tmp/workiq-config.log"
+        die "WorkIQ EULA acceptance could not be verified; login was not started."
+    fi
+    rm -f -- "$tmp/workiq-config.log"
+}
+
+install_copilot() {
+    local copilot_repair=0 copilot_version="" copilot_diagnostic node_arch copilot_status=0
+    if available copilot; then
+        if check_copilot_version "$(type -P copilot)"; then
+            echo "Keeping existing copilot: $(type -P copilot)"
+            return
+        else
+            copilot_status=$?
+        fi
+        printf '%s\n' "$copilot_diagnostic" >&2
+        (( copilot_status != 124 && copilot_status != 137 )) \
+            || die "Existing Copilot version check timed out; keeping the installation unchanged. Inspect the task log and retry copilot --version manually."
+        [[ "$copilot_diagnostic" == *"no platform package found"* ]] \
+            || die "Existing Copilot has an unrecognized error; refusing to replace it automatically."
+        copilot_repair=1
+    fi
+    require_commands node npm python3
+    if (( china_mirror_requested == 1 )); then
+        require_step npm-mirror
+    fi
+    require_supported_node
+    if (( copilot_repair == 1 )); then
+        case "$(readlink -f "$(type -P copilot)")" in
+            "$HOME/.local/lib/node_modules/@github/copilot/"*) ;;
+            *) die "Broken Copilot is outside the managed npm prefix; repair it using its original package manager." ;;
+        esac
+        copilot_version="$(python3 - "$(type -P copilot)" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+executable = Path(sys.argv[1]).resolve(strict=True)
+for parent in executable.parents:
+    manifest = parent / "package.json"
+    if manifest.is_file():
+        package = json.loads(manifest.read_text(encoding="utf-8"))
+        if package.get("name") == "@github/copilot":
+            print(package["version"])
+            break
+else:
+    raise SystemExit("Cannot identify the broken Copilot version; repair it manually.")
+PY
+)"
+    fi
+    ensure_user_npm_prefix
+    node_arch="$(node -p 'process.arch')"
+    case "$node_arch" in
+        x64|arm64) ;;
+        *) die "Unsupported Node architecture for Copilot: $node_arch" ;;
+    esac
+    if [[ -z "$copilot_version" ]]; then
+        copilot_version="$(retry "Reading the Copilot version" timeout --kill-after=5s 45s npm view @github/copilot version)"
+    fi
+    [[ "$copilot_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+        || die "Invalid Copilot version: $copilot_version"
+    if (( copilot_repair == 1 )); then
+        echo "Repairing Copilot $copilot_version without upgrading it; account settings are preserved."
+        timeout --kill-after=5s 60s npm uninstall --global --ignore-scripts \
+            @github/copilot "@github/copilot-linux-$node_arch"
+    else
+        echo "Installing missing Copilot $copilot_version and its Linux platform package..."
+    fi
+    # A required platform dependency makes download failures fatal instead of silently optional.
+    retry "Installing Copilot $copilot_version" timeout --kill-after=5s 180s npm install --global --include=optional --ignore-scripts=false \
+        --os=linux "--cpu=$node_arch" --libc=glibc \
+        "@github/copilot@$copilot_version" "@github/copilot-linux-$node_arch@$copilot_version"
+    hash -r
+    if check_copilot_version "$HOME/.local/bin/copilot"; then
+        printf '%s\n' "$copilot_diagnostic"
+    else
+        printf '%s\n' "$copilot_diagnostic" >&2
+        die "Copilot is still unusable after installation. Check the task log, native binary permissions and platform compatibility."
+    fi
+}
+
+configure_bash() {
+    require_commands python3
+    {
+        declare -f _wsl_cli_windows_path _wsl_cli_configure_path
+        echo '_wsl_cli_configure_path'
+        echo 'unset -f _wsl_cli_windows_path _wsl_cli_configure_path'
+        cat <<'MIRROR_SOURCE'
+if [[ -f "$HOME/.local/share/wsl-bootstrap/china-mirrors.sh" ]]; then
+    source "$HOME/.local/share/wsl-bootstrap/china-mirrors.sh"
+fi
+MIRROR_SOURCE
+        if (( is_wsl == 1 )) && [[ -x "$HOME/.local/bin/wsl-browser" ]]; then
+            cat <<'BASHRC'
+export BROWSER="$HOME/.local/bin/wsl-browser"
+export GH_BROWSER="$BROWSER"
+BASHRC
+        fi
+    } > "$tmp/config-block"
+    write_managed_block "$HOME/.bashrc" "native PATH"
+    configure_copilot_aliases "$HOME/.bashrc"
+    bash -n "$HOME/.bashrc"
+    hash -r
+    echo "Bash compatibility settings saved."
+}
+
+try_interactive_login() {
+    guide_login "$@"
+    case "$login_command_status" in
+        0) return ;;
+        2)
+            echo "Login skipped by the user." > "$report_directory/$current_step.skipped"
+            exit 0
+            ;;
+        *) die "$1 login failed; use the manual retry command shown above." ;;
+    esac
+}
+
+authenticate_service() {
+    local label="$1" probe="$2" status=0
+    shift 2
+    "$probe" || status=$?
+    case "$status" in
+        0) echo "$label has usable credentials; keeping the active account." ;;
+        1)
+            try_interactive_login "$label" "$@"
+            "$probe" || die "$label login completed but usable credentials could not be verified."
+            ;;
+        *) die "$label credential validation failed; resolve network/account errors before retrying. Saved accounts were not replaced." ;;
+    esac
+}
+
+login_github() {
+    require_commands gh git
+    echo "Manual retry if needed: gh auth login --hostname github.com -p ssh --web"
+    authenticate_service "GitHub CLI" github_is_logged_in \
+        timeout --foreground --kill-after=5s 300s gh auth login --hostname github.com -p ssh --web
+    configure_git_identity
+}
+
+login_azure() {
+    require_commands az
+    printf 'Manual retry if needed: az login'
+    if (( ${#azure_login_arguments[@]} > 0 )); then
+        printf ' %q' "${azure_login_arguments[@]}"
+    fi
+    printf '\n'
+    authenticate_service "Azure CLI" azure_is_logged_in \
+        timeout --foreground --kill-after=5s 300s az login "${azure_login_arguments[@]}"
+}
+
+login_copilot() {
+    require_commands copilot gh
+    local github_status=0 status=0
+    echo "Manual retry if needed: copilot login --device-code (requires a working system keyring)"
+    if [[ "${step_status[login-github]:-not-run}" != success ]]; then
+        github_is_logged_in || github_status=$?
+    fi
+    copilot_is_logged_in "$github_status" || status=$?
+    case "$status" in
+        0) echo "Copilot can reuse existing credentials; permissions/subscription are checked when used." ;;
+        1) try_interactive_login "Copilot CLI" copilot_login_secure ;;
+        *) die "Copilot credential validation failed; saved accounts were not replaced." ;;
+    esac
+}
+
+login_workiq() {
+    require_commands workiq tee grep
+    local status=0
+    ensure_workiq_eula
+    echo "Manual retry if needed: workiq auth login"
+    echo "WorkIQ reuses cached credentials first; interactive sign-in is only needed when they are unavailable."
+    # WorkIQ 1.0.1 may print a login failure and still exit zero.
+    # Keep authentication output on the terminal, not in persistent task logs.
+    ( umask 077; : > "$tmp/workiq-login.log" )
+    LC_ALL=C LANG=C timeout --foreground --kill-after=5s 300s workiq auth login \
+        2>&1 | tee "$tmp/workiq-login.log" || status=$?
+    if (( status == 0 )) && grep -q '^Logged in as .' "$tmp/workiq-login.log" \
+        && ! grep -q 'Login failed:' "$tmp/workiq-login.log"; then
+        rm -f -- "$tmp/workiq-login.log"
+        echo "WorkIQ credentials verified; the active account is retained."
+        return
+    fi
+    rm -f -- "$tmp/workiq-login.log"
+    echo "WebKit/libsecret packages were checked before login. If the broker still fails, inspect the displayed error; workiq config set disableBrokeredAuth=true selects browser authentication." >&2
+    die "WorkIQ login was not confirmed (exit $status). Existing credentials/configuration were not reset; use the manual retry command."
+}
+
+[[ -x /usr/bin/flock ]] || die "Native flock is required (Ubuntu util-linux)."
+mkdir -p "$HOME/.local/state/wsl-bootstrap"
+exec 9>"$HOME/.local/state/wsl-bootstrap/setup.lock"
+/usr/bin/flock -n 9 || die "Another setup-wsl run is active for this user; finish it before rerunning."
+report_directory="$(umask 077; mkdir -p "$HOME/.local/state/wsl-bootstrap"; \
+    /usr/bin/mktemp -d "$HOME/.local/state/wsl-bootstrap/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")"
+echo "Per-task logs: $report_directory"
+write_mirror_config_helper
+
+run_step sudo "Authorizing sudo and checking its policy" "" authorize_sudo
+run_step sudo-policy "Checking the requested WSL passwordless-sudo policy" "sudo" configure_sudo_policy
+run_step github-source-migration "Checking the legacy GitHub CLI apt source" "" retire_missing_github_cli_source
+run_step apt-sources "Configuring requested apt mirrors" "" configure_china_apt_sources
+run_step apt-update "Updating apt package metadata" "sudo apt-sources" prepare_apt
+run_step apt-upgrade "Upgrading installed apt packages" "apt-update" upgrade_apt_packages
+run_step curl "Checking curl and CA certificates" "" install_curl
+run_step git "Checking native Git" "" ensure_command git git
+run_step system-tools "Checking process and session utilities" "" install_system_utilities
+run_step python3 "Checking native Python 3" "" install_python3
+run_step python "Checking the Python command alias" "" install_python_alias
+run_step pip "Checking Python pip" "" install_pip
+run_step venv "Checking Python venv and ensurepip" "" install_venv
+run_step browser-bridge "Configuring the Windows login-browser bridge" "" configure_browser
+if [[ "${step_status[browser-bridge]}" == success ]] && (( is_wsl == 1 )); then
+    export BROWSER="$HOME/.local/bin/wsl-browser"
+    export GH_BROWSER="$BROWSER"
+fi
+run_step github-cli "Checking or installing GitHub CLI" "" install_github_cli
+run_step gh-aw "Checking or installing the gh-aw extension" "github-cli" install_gh_aw
+run_step azure-cli "Checking or installing Azure CLI" "" install_azure_cli
+run_step node "Checking or installing Node.js" "" install_node
+run_step npm "Checking npm" "" install_npm
+run_step npm-mirror "Configuring the requested npm mirror" "" configure_npm_mirror
+run_step pip-mirror "Configuring the requested pip mirror" "" configure_pip_mirror
+run_step node-mirrors "Saving requested Node mirror environment" "" configure_node_mirror_environment
+if (( workiq_requested == 1 )); then
+    run_step workiq "Checking or installing global WorkIQ" "" install_workiq
+    run_step workiq-runtime "Checking WorkIQ WebKit and libsecret libraries" "workiq" install_workiq_runtime
+else
+    skip_step workiq "Checking or installing global WorkIQ" "$workiq_skip_reason"
+    skip_step workiq-runtime "Checking WorkIQ WebKit and libsecret libraries" "$workiq_skip_reason"
+fi
+run_step copilot "Checking or installing Copilot" "" install_copilot
+run_step agent-browser "Checking or installing agent-browser CLI" "" install_agent_browser
+run_step agent-browser-skill "Checking or installing the global agent-browser skill for GitHub Copilot" "" install_agent_browser_skill
+run_step web-instructions "Saving Copilot local web validation instructions" "" configure_web_instructions
+run_step bash "Configuring Bash PATH and Copilot shortcuts" "python3" configure_bash
+run_step zsh "Checking native zsh" "" ensure_command zsh zsh
+run_step autosuggestions "Installing pinned zsh history suggestions" "" \
+    install_zsh_plugin zsh-autosuggestions e52ee8ca55bcc56a17c828767a3f98f22a68d4eb
+run_step highlighting "Installing pinned zsh syntax highlighting" "" \
+    install_zsh_plugin zsh-syntax-highlighting db085e4661f6aafd24e5acb5b2e17e4dd5dddf3e
+run_step zsh-config "Configuring interactive zsh completion and plugins" "zsh python3 autosuggestions highlighting" configure_zsh
+run_step zsh-check "Verifying login and non-login zsh functionality" "zsh-config" verify_zsh
+run_step login-shell "Setting the verified zsh as the default login shell" "zsh-check" set_default_zsh
+run_step tmux "Checking stable tmux" "" ensure_command tmux tmux -V
+run_step tmux-config "Configuring tmux to use the verified zsh" "tmux zsh-check" configure_tmux
+run_step docker "Checking Docker Engine" "" configure_docker
+run_step docker-compose "Checking Docker Compose" "" install_docker_plugin compose
+run_step docker-buildx "Checking Docker Buildx" "" install_docker_plugin buildx
+run_step automation-browser "Checking or installing the default automation browser and Linux libraries" "agent-browser" configure_agent_browser
+
+if (( login_requested == 1 )) && ( : </dev/tty ) 2>/dev/null; then
+    run_step login-github "Checking GitHub login and Git identity" "" login_github
+    run_step login-azure "Checking Azure login" "" login_azure
+    run_step login-copilot "Checking Copilot login" "" login_copilot
+    if (( workiq_requested == 1 )); then
+        run_step login-workiq "Checking WorkIQ EULA and login (reusing cached credentials)" "workiq workiq-runtime" login_workiq
+    else
+        skip_step login-workiq "Checking WorkIQ EULA and login" "$workiq_skip_reason"
+    fi
+else
+    skip_step login-github "Checking GitHub login and Git identity" "Login disabled or no controlling terminal."
+    skip_step login-azure "Checking Azure login" "Login disabled or no controlling terminal."
+    skip_step login-copilot "Checking Copilot login" "Login disabled or no controlling terminal."
+    if (( workiq_requested == 1 )); then
+        skip_step login-workiq "Checking WorkIQ login" "Login disabled or no controlling terminal."
+    else
+        skip_step login-workiq "Checking WorkIQ EULA and login" "$workiq_skip_reason"
+    fi
+    echo "Manual login: gh auth login --hostname github.com -p ssh --web"
+    printf 'Manual login: az login'
+    if (( ${#azure_login_arguments[@]} > 0 )); then
+        printf ' %q' "${azure_login_arguments[@]}"
+    fi
+    printf '\n%s\n' "Manual login: copilot login --device-code (requires a working system keyring)"
+    if (( workiq_requested == 1 )); then
+        echo "Manual login: workiq auth login"
+    fi
+fi
+
+print_setup_summary | tee "$report_directory/summary.txt"
+if [[ -f "$run_state/docker-restart-required" ]]; then
+    echo "WSL systemd is configured for the next boot; restart this distro from Windows when convenient."
+fi
+if [[ -e /var/run/reboot-required ]]; then
+    echo "Package upgrades require a restart; schedule it when convenient. Setup never restarts automatically."
+fi
+if [[ "${step_status[zsh-check]}" == success ]]; then
+    echo "Zsh plugins are verified. Existing shells/tmux servers are not reloaded; use a NEW session or: exec zsh -l"
+    echo "History suggestions appear after typing a prefix of a command present in that user's zsh history."
+fi
+echo "New Docker group membership also needs a fresh login session."
+incomplete_steps=0
+for step in "${step_order[@]}"; do
+    if [[ "${step_status[$step]}" == failed || "${step_status[$step]}" == blocked ]]; then
+        incomplete_steps=$((incomplete_steps + 1))
+    fi
+done
+if (( incomplete_steps > 0 )); then
+    die "$incomplete_steps task(s) failed or were blocked. Independent tasks were still attempted; use the manual commands in summary.txt to repair individual steps, or rerun setup after fixing the reported causes."
+fi
+echo "All requested setup tasks completed; explicitly skipped login steps are listed above."
+if [[ "${step_status[zsh-check]}" == success && -t 1 && -t 2 ]] && ( : </dev/tty ) 2>/dev/null; then
+    echo "Entering the verified interactive login zsh."
+    cleanup
+    trap - EXIT
+    exec 9>&-
+    exec zsh -il </dev/tty
+fi
+# WSL_BOOTSTRAP_SCRIPT_END
